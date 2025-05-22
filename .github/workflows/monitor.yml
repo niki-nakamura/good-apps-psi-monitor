@@ -1,0 +1,27 @@
+name: Core Web Vitals Monitor
+
+on:
+  schedule:
+    - cron: '0 0 * * *'  # 毎日UTC 0:00に実行
+  workflow_dispatch:      # 手動実行トリガー（必要に応じて）
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.x'
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Run monitoring script
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          PSI_API_KEY: ${{ secrets.PSI_API_KEY }}
+        run: python scripts/monitor.py
