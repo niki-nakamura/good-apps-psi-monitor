@@ -64,10 +64,23 @@ for strategy in ["mobile", "desktop"]:
             cls_val = cls_val or 0
         issues[strategy].append(f"CLS {cls_val:.2f}")
 
-# モバイル・デスクトップともに不良指標がなければ通知しないで終了
 if not issues["mobile"] and not issues["desktop"]:
-    print("No poor Core Web Vitals – no Slack notification sent.")
+    # 不良指標がなかった場合でも Slack に通知
+    message = f"Core Web Vitals Monitor：{TARGET_URL} について不良指標は検知されませんでした。"
+    payload = {"text": message}
+    try:
+        resp = requests.post(
+            SLACK_WEBHOOK_URL,
+            data=json.dumps(payload),
+            headers={"Content-Type": "application/json"}
+        )
+        if resp.status_code != 200:
+            print(f"Slack webhook response: {resp.status_code}, body: {resp.text}")
+    except Exception as e:
+        print(f"Failed to send Slack notification: {e}")
+    # ここで一度終了
     exit(0)
+
 
 # Slack通知メッセージの組み立て
 message_lines = []
