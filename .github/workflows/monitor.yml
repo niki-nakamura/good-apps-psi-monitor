@@ -2,26 +2,27 @@ name: Core Web Vitals Monitor
 
 on:
   schedule:
-    - cron: '0 0 * * *'  # 毎日UTC 0:00に実行
-  workflow_dispatch:      # 手動実行トリガー（必要に応じて）
+    - cron: "0 3 * * *"    # 毎日3:00（UTCベース）に定期実行
+  workflow_dispatch:       # 手動トリガーも許可
+    {}
 
 jobs:
-  monitor:
+  psi_monitor:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
+      - name: 🛠 Checkout repository
         uses: actions/checkout@v3
 
-      - name: Set up Python
-        uses: actions/setup-python@v4
+      - name: 🐍 Set up Python
+        uses: actions/setup-python@v3
         with:
-          python-version: '3.x'
+          python-version: "3.x"
 
-      - name: Install dependencies
-        run: pip install requests
+      - name: 📦 Install dependencies
+        run: pip install requests beautifulsoup4
 
-      - name: Run monitoring script
+      - name: 🚀 Run Core Web Vitals monitor
         env:
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-          PSI_API_KEY: ${{ secrets.PSI_API_KEY }}
+          PSI_API_KEY: ${{ secrets.PSI_API_KEY }}               # PageSpeed Insights APIキー
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}   # Slack通知用Webhook URL
         run: python scripts/monitor.py
