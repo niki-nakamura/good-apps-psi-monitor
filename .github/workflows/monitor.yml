@@ -1,28 +1,23 @@
-name: Core Web Vitals Monitor
+name: Core Web Vitals CrUX Monitor
 
+# 毎日午前9時（JST）に実行する（cronはUTC指定。0 0 * * * はUTC0時=日本時間9時）。
 on:
   schedule:
-    - cron: "0 3 * * *"    # 毎日3:00（UTCベース）に定期実行
-  workflow_dispatch:       # 手動トリガーも許可
-    {}
+    - cron: '0 0 * * *'
 
 jobs:
-  psi_monitor:
+  crux_monitor:
     runs-on: ubuntu-latest
     steps:
-      - name: 🛠 Checkout repository
-        uses: actions/checkout@v3
-
-      - name: 🐍 Set up Python
-        uses: actions/setup-python@v3
+      - uses: actions/checkout@v3  # リポジトリのコードをチェックアウト
+      - uses: actions/setup-python@v3  # Python環境をセットアップ
         with:
-          python-version: "3.x"
-
-      - name: 📦 Install dependencies
-        run: pip install requests beautifulsoup4
-
-      - name: 🚀 Run Core Web Vitals monitor
+          python-version: '3.10'
+      - name: Install dependencies
+        run: pip install requests
+      - name: Run CrUX CWV report script
+        run: python crux_cwv_report.py
         env:
-          PSI_API_KEY: ${{ secrets.PSI_API_KEY }}               # PageSpeed Insights APIキー
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}   # Slack通知用Webhook URL
-        run: python scripts/monitor.py
+          CRUX_API_KEY: ${{ secrets.CRUX_API_KEY }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
