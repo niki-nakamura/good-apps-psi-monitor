@@ -1,23 +1,28 @@
-name: Core Web Vitals CrUX Monitor
+name: CrUX Web Vitals Report
 
-# 毎日午前9時（JST）に実行する（cronはUTC指定。0 0 * * * はUTC0時=日本時間9時）。
 on:
   schedule:
-    - cron: '0 0 * * *'
+    - cron: '0 23 * * *'   # UTC 23:00 = JST 08:00 (毎日定期実行)
+  workflow_dispatch:       # 手動実行トリガーも許可
 
 jobs:
-  crux_monitor:
+  report:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3  # リポジトリのコードをチェックアウト
-      - uses: actions/setup-python@v3  # Python環境をセットアップ
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v3
         with:
           python-version: '3.10'
-      - name: Install dependencies
-        run: pip install requests
-      - name: Run CrUX CWV report script
-        run: python crux_cwv_report.py
+
+      - name: Install Dependencies
+        run: pip install matplotlib requests
+
+      - name: Run CrUX Report Script
         env:
           CRUX_API_KEY: ${{ secrets.CRUX_API_KEY }}
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
+        run: python path/to/your_script.py
