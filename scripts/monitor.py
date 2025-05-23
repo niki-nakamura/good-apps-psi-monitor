@@ -1,139 +1,134 @@
-import os
-import requests
-import json
-from datetime import datetime
+import os, json, requests
+import matplotlib.pyplot as plt
 
-# 環境変数からAPIキーとWebhook URLを取得
-CRUX_API_KEY = os.environ.get("CRUX_API_KEY")
-SLACK_WEBHOOK_URL = os.environ.get("SLACK_WEBHOOK_URL")
+# 環境変数からAPIキーやトークンを取得
+CRUX_API_KEY    = os.environ.get("CRUX_API_KEY")
+SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN")
+SLACK_CHANNEL   = os.environ.get("SLACK_CHANNEL_ID")
 
-# 対象の全URLリストを定義（good-apps.jp配下のページを網羅）
-urls = [
+# 対象ページURLのリスト（good-apps.jp配下の全ページURLを列挙）
+pages = [
     "https://good-apps.jp/", 
-    # ...必要に応じて他のページURLを追加
+    # ...必要に応じて他のページURLも追加...
 ]
 
-# デバイス種別と指標の設定
-form_factors = ["PHONE", "DESKTOP"]  # PHONE=モバイル, DESKTOP=PC
-metrics = ["largest_contentful_paint", "interaction_to_next_paint", "cumulative_layout_shift"]
-
-# カテゴリ判定の補助関数（指標名と値からカテゴリを判定）
-def categorize_metric(metric_name, p75_value):
-    category = ""
-    if metric_name == "largest_contentful_paint":
-        # LCPはミリ秒(ms)単位で数値が返る（例: 2400ms = 2.4秒）
-        if p75_value is None:
-            category = "データ不足"
-        elif p75_value <= 2500:
-            category = "良好"
-        elif p75_value <= 4000:
-            category = "改善が必要"
-        else:
-            category = "不良"
-    elif metric_name == "interaction_to_next_paint":
-        # INPもms単位（FIDの後継指標）
-        if p75_value is None:
-            category = "データ不足"
-        elif p75_value <= 200:
-            category = "良好"
-        elif p75_value <= 500:
-            category = "改善が必要"
-        else:
-            category = "不良"
-    elif metric_name == "cumulative_layout_shift":
-        # CLSは小数（0.01など）の文字列として返る場合がある
-        if p75_value is None:
-            category = "データ不足"
-        else:
-            # CLS値は文字列の可能性があるため数値に変換
-            cls_value = float(p75_value)
-            if cls_value < 0.1:
-                category = "良好"
-            elif cls_value < 0.25:
-                category = "改善が必要"
-            else:
-                category = "不良"
-    return category
-
-# 集計用のデータ構造を初期化
-# 例: results[form_factor][metric][category] = カウント
-results = {
-    "PHONE": { "largest_contentful_paint": {"良好":0, "改善が必要":0, "不良":0},
-               "interaction_to_next_paint": {"良好":0, "改善が必要":0, "不良":0},
-               "cumulative_layout_shift": {"良好":0, "改善が必要":0, "不良":0} },
-    "DESKTOP": { "largest_contentful_paint": {"良好":0, "改善が必要":0, "不良":0},
-                 "interaction_to_next_paint": {"良好":0, "改善が必要":0, "不良":0},
-                 "cumulative_layout_shift": {"良好":0, "改善が必要":0, "不良":0} }
+# コアウェブバイタル指標の閾値定義（単位統一: LCPとINPはms, CLSは値そのまま）
+THRESHOLDS = {
+    "largest_contentful_paint": {"good": 2500, "ni": 4000},      # ms
+    "interaction_to_next_paint": {"good": 200, "ni": 500},       # ms
+    "cumulative_layout_shift": {"good": 0.1, "ni": 0.25}         # unitless
 }
 
-# CrUX History APIエンドポイントURL
-CRUX_API_ENDPOINT = f"https://chromeuxreport.googleapis.com/v1/records:queryHistoryRecord?key={CRUX_API_KEY}"
+# 集計用のデータ構造初期化
+# metrics_data[metric][form_factor][week_index]["good/ni/poor"] = count
+metrics = ["largest_contentful_paint", "interaction_to_next_paint", "cumulative_layout_shift"]
+form_factors = ["PHONE", "DESKTOP"]
+weeks_count = 13
+# 初期化：指標ごと・デバイスごとの週次集計を0で埋める
+metrics_data = {
+    m: {
+        ff: [ {"good": 0, "ni": 0, "poor": 0} for _ in range(weeks_count) ]
+        for ff in form_factors
+    }
+    for m in metrics
+}
 
-# 各URLに対してAPIを呼び出しデータ取得
-for url in urls:
-    for form in form_factors:
-        # リクエストボディを構築（page URL単位のデータ取得）
+# CrUX APIから各ページの履歴データを取得
+api_endpoint = f"https://chromeuxreport.googleapis.com/v1/records:queryHistoryRecord?key={CRUX_API_KEY}"
+headers = {"Content-Type": "application/json", "Accept": "application/json"}
+
+for url in pages:
+    for ff in form_factors:
+        # リクエストボディを構築
         request_body = {
             "url": url,
-            "formFactor": form,
+            "formFactor": ff,
             "metrics": metrics,
-            "collectionPeriodCount": 13  # 直近13期間（週）分のデータを取得
+            "collectionPeriodCount": weeks_count
         }
-        try:
-            response = requests.post(CRUX_API_ENDPOINT, headers={"Content-Type": "application/json"}, 
-                                     data=json.dumps(request_body))
-            data = response.json()
-        except Exception as e:
-            print(f"Error fetching data for {url} ({form}): {e}")
+        response = requests.post(api_endpoint, headers=headers, json=request_body)
+        if response.status_code != 200:
+            print(f"CrUX API error for {url} ({ff}): {response.status_code}")
             continue
-
-        # APIから正常なレスポンスが得られたか確認
-        if "record" not in data:
-            # データが無い (例: 該当URLに十分な利用実績データが無い場合など)
+        data = response.json()
+        # レスポンスから各メトリクスのタイムシリーズを取得
+        if "record" not in data or "metrics" not in data["record"]:
+            # データが無い場合はスキップ
             continue
-
-        # 各指標のタイムシリーズから最新（直近週）のp75値を取得してカテゴリ判定
-        record = data["record"]
-        for metric_name, metric_data in record.items():
-            if metric_name not in metrics:
-                continue  # 念のため指定外の指標は無視
-            # percentilesTimeseries内のp75s配列から最新値を取得
-            try:
-                p75_values = metric_data["percentilesTimeseries"]["p75s"]
-            except KeyError:
-                continue  # 該当指標のデータが無い
-            if not p75_values:
+        metrics_ts = data["record"]["metrics"]
+        for metric, values in metrics_ts.items():
+            # 念のため、要求したmetricsのみ処理
+            if metric not in THRESHOLDS:
                 continue
-            latest_p75 = p75_values[-1]  # 最新週のp75値
-            category = categorize_metric(metric_name, latest_p75)
-            if category in ["良好", "改善が必要", "不良"]:
-                results[form][metric_name][category] += 1
+            # p75のタイムシリーズを取得（存在しない場合はスキップ）
+            if "percentilesTimeseries" not in values or "p75s" not in values["percentilesTimeseries"]:
+                continue
+            p75_series = values["percentilesTimeseries"]["p75s"]
+            # 各週のp75値を判定し、該当カテゴリーのページ数をインクリメント
+            for week_idx, p75_value in enumerate(p75_series):
+                thr = THRESHOLDS[metric]
+                if metric != "cumulative_layout_shift":
+                    # LCP, INPはミリ秒数値
+                    if p75_value <= thr["good"]:
+                        metrics_data[metric][ff][week_idx]["good"] += 1
+                    elif p75_value <= thr["ni"]:
+                        metrics_data[metric][ff][week_idx]["ni"] += 1
+                    else:
+                        metrics_data[metric][ff][week_idx]["poor"] += 1
+                else:
+                    # CLSはそのまま比較
+                    if p75_value <= thr["good"]:
+                        metrics_data[metric][ff][week_idx]["good"] += 1
+                    elif p75_value <= thr["ni"]:
+                        metrics_data[metric][ff][week_idx]["ni"] += 1
+                    else:
+                        metrics_data[metric][ff][week_idx]["poor"] += 1
 
-# Slack通知メッセージの作成
-date_str = datetime.now().strftime("%Y-%m-%d")  # 本日の日付
-total_urls = len(urls)
-message_lines = []
-message_lines.append(f"*{date_str} 時点のCore Web Vitals計測結果*（直近28日集計）")
-# モバイル版結果
-message_lines.append(f"*モバイル版（PHONE, 全{total_urls} URL）*")
-for category in ["良好", "改善が必要", "不良"]:
-    lcp_count = results["PHONE"]["largest_contentful_paint"][category]
-    inp_count = results["PHONE"]["interaction_to_next_paint"][category]
-    cls_count = results["PHONE"]["cumulative_layout_shift"][category]
-    message_lines.append(f"{category}: LCP {lcp_count}件, INP {inp_count}件, CLS {cls_count}件")
-# デスクトップ版結果
-message_lines.append(f"\n*デスクトップ版（DESKTOP, 全{total_urls} URL）*")
-for category in ["良好", "改善が必要", "不良"]:
-    lcp_count = results["DESKTOP"]["largest_contentful_paint"][category]
-    inp_count = results["DESKTOP"]["interaction_to_next_paint"][category]
-    cls_count = results["DESKTOP"]["cumulative_layout_shift"][category]
-    message_lines.append(f"{category}: LCP {lcp_count}件, INP {inp_count}件, CLS {cls_count}件")
+# 集計データに基づきグラフを作成（指標×デバイスのサブプロット）
+fig, axes = plt.subplots(len(metrics), len(form_factors), figsize=(10, 12))
+category_colors = {"good": "#4caf50", "ni": "#ffc107", "poor": "#f44336"}
+category_labels = {"good": "Good", "ni": "Needs Improvement", "poor": "Poor"}
 
-# SlackへのPOST送信
-payload = {"text": "\n".join(message_lines)}
-try:
-    resp = requests.post(SLACK_WEBHOOK_URL, headers={"Content-Type": "application/json"}, data=json.dumps(payload))
-    if resp.status_code != 200:
-        print(f"Slack通知エラー: ステータスコード {resp.status_code}")
-except Exception as e:
-    print(f"Slack通知のリクエスト中にエラー: {e}")
+weeks = list(range(1, weeks_count+1))
+for i, metric in enumerate(metrics):
+    metric_name = metric.upper()  # 指標名を大文字略称に（LCP, INP, CLSなど）
+    for j, ff in enumerate(form_factors):
+        ax = axes[i, j]
+        data_series = metrics_data[metric][ff]
+        # カテゴリ毎に折れ線プロット
+        ax.plot(weeks, [d["good"] for d in data_series], label="Good", color=category_colors["good"], marker='o')
+        ax.plot(weeks, [d["ni"]   for d in data_series], label="Needs Improvement", color=category_colors["ni"], marker='o')
+        ax.plot(weeks, [d["poor"] for d in data_series], label="Poor", color=category_colors["poor"], marker='o')
+        # 軸ラベル・タイトル設定
+        ax.set_title(f"{metric_name} - {'Mobile' if ff=='PHONE' else 'Desktop'}")
+        ax.set_xlabel("Week")
+        ax.set_ylabel("Page count")
+        ax.set_xticks([1, max(1, weeks_count//2), weeks_count])  # 1, 中間, 最終週あたりを目盛り表示
+        ax.set_ylim(0, len(pages))  # 縦軸スケール：0～総ページ数
+        ax.grid(True, linestyle='--', alpha=0.5)
+# 凡例は図全体の下部にまとめて配置
+handles, labels = axes[0,0].get_legend_handles_labels()
+fig.legend(handles, labels, loc='lower center', ncol=3)
+fig.tight_layout(rect=[0, 0.05, 1, 1])  # 下部に凡例分の余白を確保
+
+# グラフを一時ファイルに保存
+chart_path = "cwv_trends.png"
+fig.savefig(chart_path)
+
+# Slackに画像ファイルをアップロードしてメッセージ送信
+message_text = f"*{len(pages)} pages* - 過去13週間のCore Web Vitalsカテゴリー推移レポート（モバイル/PC）"
+with open(chart_path, "rb") as f:
+    file_data = {
+        "channels": SLACK_CHANNEL,
+        "initial_comment": message_text,
+        "filename": "cwv_trends.png"
+    }
+    response = requests.post(
+        "https://slack.com/api/files.upload",
+        headers={"Authorization": f"Bearer {SLACK_BOT_TOKEN}"},
+        params=file_data,
+        files={"file": f}
+    )
+    res = response.json()
+    if not res.get("ok"):
+        print("Slack API error:", res.get("error", "unknown error"))
