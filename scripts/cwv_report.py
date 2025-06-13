@@ -69,14 +69,18 @@ for url in pages:
                 # ① データがない週はスキップ
                 if entry is None:
                     continue
-
-                # ② 数値 or 辞書 {"percentile": 数値} を判定
-                p75_value = (
-                    entry["percentile"]          # 辞書形式
-                    if isinstance(entry, dict) and "percentile" in entry
-                    else entry                   # 旧仕様の数値
-                )
-
++                # 値の取り出し（辞書形式 or 純数値 or 文字列）
++                raw = (
++                    entry.get("percentile")              # 辞書形式 {"percentile": ...}
++                    if isinstance(entry, dict)
++                    else entry                           # 旧仕様
++                )
++                try:
++                    p75_value = float(raw)               # 文字列なら数値へ変換
++                except (TypeError, ValueError):
++                    # 予期しない形式はスキップ & ログ
++                    print(f"Skip invalid value: {raw!r} for {metric} {ff} week{week_idx}")
++                    continue
                 thr = THRESHOLDS[metric]
 
                 if metric != "cumulative_layout_shift":
