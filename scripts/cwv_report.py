@@ -64,11 +64,22 @@ for url in pages:
             if "percentilesTimeseries" not in values or "p75s" not in values["percentilesTimeseries"]:
                 continue
             p75_series = values["percentilesTimeseries"]["p75s"]
-            # 各週のp75値を判定し、該当カテゴリーのページ数をインクリメント
-            for week_idx, p75_value in enumerate(p75_series):
+
+            for week_idx, entry in enumerate(p75_series):
+                # ① データがない週はスキップ
+                if entry is None:
+                    continue
+
+                # ② 数値 or 辞書 {"percentile": 数値} を判定
+                p75_value = (
+                    entry["percentile"]          # 辞書形式
+                    if isinstance(entry, dict) and "percentile" in entry
+                    else entry                   # 旧仕様の数値
+                )
+
                 thr = THRESHOLDS[metric]
+
                 if metric != "cumulative_layout_shift":
-                    # LCP, INPはミリ秒数値
                     if p75_value <= thr["good"]:
                         metrics_data[metric][ff][week_idx]["good"] += 1
                     elif p75_value <= thr["ni"]:
