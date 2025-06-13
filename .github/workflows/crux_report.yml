@@ -25,4 +25,4 @@ jobs:
           CRUX_API_KEY: ${{ secrets.CRUX_API_KEY }}
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
-        run: python path/to/your_script.py
+        run: python scripts/cwv_report.py
