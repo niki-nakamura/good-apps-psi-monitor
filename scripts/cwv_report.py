@@ -4,6 +4,7 @@ import json
 import logging
 import requests
 import matplotlib.pyplot as plt
+import xml.etree.ElementTree as ET
 
 # ──────────────────────────────
 #  ログ設定
@@ -16,6 +17,7 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 CRUX_API_KEY    = os.environ.get("CRUX_API_KEY")
 SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN")
 SLACK_CHANNEL   = os.environ.get("SLACK_CHANNEL_ID")
+SITEMAP_URL     = os.environ.get("SITEMAP_URL", "https://good-apps.jp/sitemap.xml")
 
 for name, val in {"CRUX_API_KEY": CRUX_API_KEY,
                   "SLACK_BOT_TOKEN": SLACK_BOT_TOKEN,
@@ -27,10 +29,32 @@ for name, val in {"CRUX_API_KEY": CRUX_API_KEY,
 # ──────────────────────────────
 #  対象 URL
 # ──────────────────────────────
-pages = [
-    "https://good-apps.jp/",
-    # 追加入力可
-]
+def fetch_sitemap_urls(url: str) -> list[str]:
+    try:
+        res = requests.get(url)
+        if res.status_code != 200:
+            logging.warning("Failed to fetch sitemap %s: %s", url, res.status_code)
+            return []
+        root = ET.fromstring(res.text)
+    except Exception as e:  # pragma: no cover - simple log
+        logging.warning("Error loading sitemap %s: %s", url, e)
+        return []
+
+    ns = {"sm": "http://www.sitemaps.org/schemas/sitemap/0.9"}
+    urls: list[str] = []
+    if root.tag.endswith("sitemapindex"):
+        for sm in root.findall("sm:sitemap", ns):
+            loc = sm.find("sm:loc", ns)
+            if loc is not None and loc.text:
+                urls.extend(fetch_sitemap_urls(loc.text.strip()))
+    else:
+        for u in root.findall("sm:url", ns):
+            loc = u.find("sm:loc", ns)
+            if loc is not None and loc.text:
+                urls.append(loc.text.strip())
+    return urls
+
+pages = fetch_sitemap_urls(SITEMAP_URL) or ["https://good-apps.jp/"]
 
 # ──────────────────────────────
 #  閾値定義
@@ -50,6 +74,8 @@ metrics_data = {
         for ff in form_factors}
     for m in metrics
 }
+
+poor_pages: dict[str, set[str]] = {}
 
 # ──────────────────────────────
 #  CrUX History API 呼び出し
@@ -82,6 +108,7 @@ for url in pages:
             if metric not in THRESHOLDS:
                 continue
             ts = values.get("percentilesTimeseries", {}).get("p75s", [])
+            thr = THRESHOLDS[metric]
             for week_idx, entry in enumerate(ts):
                 if entry is None:
                     continue
@@ -93,7 +120,6 @@ for url in pages:
                                     raw, metric, ff, week_idx)
                     continue
 
-                thr = THRESHOLDS[metric]
                 cat = (
                     "good" if p75 <= thr["good"]
                     else "ni" if p75 <= thr["ni"]
@@ -101,8 +127,45 @@ for url in pages:
                 )
                 metrics_data[metric][ff][week_idx][cat] += 1
 
+            # latest week check for poor category
+            if ts:
+                last = ts[-1]
+                raw_last = last.get("percentile") if isinstance(last, dict) else last
+                try:
+                    last_val = float(raw_last)
+                except (TypeError, ValueError):
+                    last_val = None
+                if last_val is not None:
+                    cat_last = (
+                        "good" if last_val <= thr["good"]
+                        else "ni" if last_val <= thr["ni"]
+                        else "poor"
+                    )
+                    if cat_last == "poor":
+                        poor_pages.setdefault(url, set()).add(f"{metric.upper()} ({ff})")
+
         # レート制限回避（60 req/min）
         time.sleep(1)
+
+# ──────────────────────────────
+#  不良URL報告
+# ──────────────────────────────
+if poor_pages:
+    lines = ["*Poor URL(s) detected:*"]
+    for page_url, mets in poor_pages.items():
+        lines.append(f"- {page_url} : {', '.join(sorted(mets))}")
+    message = "\n".join(lines)
+    resp = requests.post(
+        "https://slack.com/api/chat.postMessage",
+        headers={
+            "Authorization": f"Bearer {SLACK_BOT_TOKEN}",
+            "Content-Type": "application/json",
+        },
+        json={"channel": SLACK_CHANNEL, "text": message},
+    )
+    if not resp.ok or not resp.json().get("ok"):
+        logging.error("Slack message failed: %s", resp.json().get("error"))
+        raise SystemExit(1)
 
 # ──────────────────────────────
 #  可視化
