@@ -2,7 +2,7 @@
 
 ## 概要
 
-`good-apps.jp` 配下の全ページを対象に、Chrome UX Report の履歴 API（CrUX History API）から 13 週間分の Core Web Vitals（LCP, INP, CLS）データを取得し、集計結果をグラフ化して毎日 Slack に通知する自動化システムです。GitHub Actions 上で Python スクリプトを日次実行し、指定の Slack チャンネルに Bot 経由で投稿します。
+`good-apps.jp` のサイトマップからページURLを自動取得し、Chrome UX Report の履歴 API（CrUX History API）から 13 週間分の Core Web Vitals（LCP, INP, CLS）データを取得して集計、グラフ化して毎日 Slack に通知する自動化システムです。GitHub Actions 上で Python スクリプトを日次実行し、指定の Slack チャンネルに Bot 経由で投稿します。
 
 ## 機能
 
@@ -11,6 +11,7 @@
 * 指標×デバイス（モバイル／デスクトップ）ごとに週次ページ数を集計
 * matplotlib で折れ線グラフを自動生成
 * Slack Bot トークンで画像＋メッセージをファイルアップロード
+* 不良URLが検出された場合、対象URLをSlackにテキスト通知
 * GitHub Actions で毎日定時に実行
 
 ## 前提条件
@@ -73,6 +74,7 @@ pip install -r requirements.txt
 CRUX\_API\_KEY=あなたのCrUX\_APIキー
 SLACK\_BOT\_TOKEN=xoxb-あなたのSlackBotトークン
 SLACK\_CHANNEL\_ID=C1234567890
+SITEMAP_URL=https://good-apps.jp/sitemap.xml
 
 ````
 
@@ -107,11 +109,12 @@ jobs:
           CRUX_API_KEY: ${{ secrets.CRUX_API_KEY }}
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
+          SITEMAP_URL: ${{ secrets.SITEMAP_URL }}
 ```
 
 ## カスタマイズ
 
-* `scripts/cwv_report.py` 内の `pages` リストに監視対象 URL を追加・変更可能
+* `SITEMAP_URL` 環境変数で取得対象サイトマップを変更可能
 * 取得期間（週数）を変更する場合は `weeks_count` を調整
 * グラフ種類（折れ線／積み上げ棒）や色設定は matplotlib コードを編集
 
