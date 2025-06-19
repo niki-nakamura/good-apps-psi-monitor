@@ -2,8 +2,8 @@ name: CrUX Web Vitals Report
 
 on:
   schedule:
-    - cron: '0 23 * * *'   # UTC 23:00 = JST 08:00 (毎日定期実行)
-  workflow_dispatch:       # 手動実行トリガーも許可
+    - cron: '0 23 * * *'
+  workflow_dispatch:
 
 jobs:
   report:
@@ -18,11 +18,11 @@ jobs:
           python-version: '3.10'
 
       - name: Install Dependencies
-        run: pip install matplotlib requests
+        run: pip install requests
 
       - name: Run CrUX Report Script
         env:
           CRUX_API_KEY: ${{ secrets.CRUX_API_KEY }}
-          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
-          SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          ORIGIN: "https://good-apps.jp"
         run: python scripts/cwv_report.py

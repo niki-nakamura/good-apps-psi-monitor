@@ -2,40 +2,30 @@
 
 ## 概要
 
-`good-apps.jp` のサイトマップからページURLを自動取得し、Chrome UX Report の履歴 API（CrUX History API）から 13 週間分の Core Web Vitals（LCP, INP, CLS）データを取得して集計、グラフ化して毎日 Slack に通知する自動化システムです。GitHub Actions 上で Python スクリプトを日次実行し、指定の Slack チャンネルに Bot 経由で投稿します。
+`good-apps.jp` の Core Web Vitals（LCP, INP, CLS）を Chrome UX Report API から毎日自動取得し、Slack に Good/NI/Poor 割合をシンプルに通知するシステムです。GitHub Actions で日次実行し、Slack Incoming Webhook で投稿します。
 
 ## 機能
 
-* CrUX History API から週次の p75 値を取得（LCP, INP, CLS）
-* Google 指定の閾値で「良好／改善が必要／不良」を判定
-* 指標×デバイス（モバイル／デスクトップ）ごとに週次ページ数を集計
-* matplotlib で折れ線グラフを自動生成
-* Slack Bot トークンで画像＋メッセージをファイルアップロード
-* 不良URLが検出された場合、対象URLをSlackにテキスト通知
-* GitHub Actions で毎日定時に実行
+* CrUX API からオリジン単位の Good/NI/Poor 割合を取得
+* Google 指定の閾値で判定
+* Slack Webhook でシンプルなテキスト通知
+* GitHub Actions で毎日定時に自動実行
 
 ## 前提条件
 
 * Python 3.8 以上
-* GitHub リポジトリの Secrets に以下を登録済み
+* GitHub Secrets に以下を登録
 
   * `CRUX_API_KEY` （Chrome UX Report API キー）
-  * `SLACK_BOT_TOKEN` （xoxb- で始まる Bot トークン）
-  * `SLACK_CHANNEL_ID` （通知先チャンネル ID）
-* Slack アプリに以下スコープを付与済み
-
-  * `chat:write`
-  * `files:write`
-  * （公開チャンネル投稿時は `chat:write.public`）
-* Bot ユーザーを通知先チャンネルに招待
+  * `SLACK_WEBHOOK_URL` （Slack Incoming Webhook URL）
 
 ## ディレクトリ構成例
 
 ```
 ├─ .github/workflows/
-│   └─ crux_report.yml       # GitHub Actions ワークフロー
+│   └─ crux_report.yml
 ├─ scripts/
-│   └─ cwv_report.py         # Core Web Vitals 取得＆Slack投稿スクリプト
+│   └─ cwv_report.py
 └─ README.md
 ```
 
@@ -44,50 +34,44 @@
 1. リポジトリをクローン
 
    ```bash
+   git clone https://github.com/your-org/good-apps-cwv-slack.git
+   cd good-apps-cwv-slack
    ```
 
-git clone [https://github.com/your-org/good-apps-cwv-slack.git](https://github.com/your-org/good-apps-cwv-slack.git)
-cd good-apps-cwv-slack
-
-````
-
 2. Python 仮想環境の作成・有効化
+
    ```bash
-python -m venv venv
-source venv/bin/activate  # macOS/Linux
-venv\Scripts\activate   # Windows
-````
+   python -m venv venv
+   source venv/bin/activate  # macOS/Linux
+   venv\Scripts\activate     # Windows
+   ```
 
 3. 依存ライブラリをインストール
 
    ```bash
+   pip install requests
    ```
 
-pip install -r requirements.txt
-
-```
-
 ## 環境変数
-環境変数は `.env` ファイルにまとめても構いませんが、GitHub Actions ではリポジトリ Secrets を利用します。
+
+GitHub Actions ではリポジトリ Secrets を利用します。
+
 ```
-
-CRUX\_API\_KEY=あなたのCrUX\_APIキー
-SLACK\_BOT\_TOKEN=xoxb-あなたのSlackBotトークン
-SLACK\_CHANNEL\_ID=C1234567890
-SITEMAP_URL=https://good-apps.jp/sitemap.xml
-
-````
+CRUX_API_KEY=あなたのCrUX_APIキー
+SLACK_WEBHOOK_URL=https://hooks.slack.com/services/xxx/yyy/zzz
+```
 
 ## スクリプトの実行
+
 ```bash
 python scripts/cwv_report.py
-````
+```
 
-* 成功すると `cwv_trends.png` が生成され、指定の Slack チャンネルに投稿されます。
+* 成功すると Slack に Good/NI/Poor 割合が投稿されます。
 
 ## GitHub Actions
 
-`.github/workflows/crux_report.yml` により、UTC 23:00（JST 08:00）に自動実行されます。
+`.github/workflows/crux_report.yml` により、毎日自動実行されます。
 
 ```yaml
 name: CrUX Web Vitals Report
@@ -103,6 +87,22 @@ jobs:
       - uses: actions/checkout@v3
       - uses: actions/setup-python@v3
         with: { python-version: '3.10' }
+      - run: pip install requests
+      - run: python scripts/cwv_report.py
+        env:
+          CRUX_API_KEY: ${{ secrets.CRUX_API_KEY }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          ORIGIN: "https://good-apps.jp"
+```
+
+## 参照
+
+* Chrome UX Report API: https://developer.chrome.com/docs/crux/reference/api/
+* Core Web Vitals 指標ガイド: https://support.google.com/webmasters/answer/9205520
+
+## ライセンス
+
+MIT License
       - run: pip install -r requirements.txt
       - run: python scripts/cwv_report.py
         env:
