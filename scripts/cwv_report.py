@@ -21,7 +21,7 @@ THRESHOLDS = {
 def classify(metric_name, histogram):
     out = {"good": 0, "ni": 0, "poor": 0}
     for bucket in histogram:
-        start = bucket.get("start", 0)
+        start = float(bucket.get("start", 0))  # ←ここで数値化
         density = bucket["density"]
         for s, e, label in THRESHOLDS.get(metric_name, []):
             if s <= start < e:
