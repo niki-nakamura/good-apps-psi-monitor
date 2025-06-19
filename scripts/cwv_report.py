@@ -45,7 +45,9 @@ def main():
     metrics = fetch()
     overall = {"good": 1, "ni": 0, "poor": 0}
     for name, data in metrics.items():
-        hist = data["histogram"]
+        hist = data.get("histogram")
+        if not hist:
+            continue  # histogramが無い場合はスキップ
         overall = worst_case(overall, classify(name, hist))
 
     pct = {k: round(v * 100, 2) for k, v in overall.items()}
