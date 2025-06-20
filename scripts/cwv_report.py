@@ -13,6 +13,9 @@ import matplotlib.pyplot as plt
 from typing import Tuple
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
+import xml.etree.ElementTree as ET
+import urllib.parse
+import time
 
 ##### 環境変数 #####
 CRUX_API_KEY  = os.getenv("CRUX_API_KEY")
@@ -188,30 +191,73 @@ def post_slack(text: str, file_path: pathlib.Path):
     else:
         print("No Slack credentials provided", file=sys.stderr)
 
+# --- サイトマップから URL を収集 -----------------
+def get_urls_from_sitemap(origin):
+    sm_url = urllib.parse.urljoin(origin, "/sitemap.xml")
+    r = requests.get(sm_url, timeout=30); r.raise_for_status()
+    root = ET.fromstring(r.text)
+    return [loc.text for loc in root.iter("{*}loc")]
+
+def load_candidate_urls():
+    try:
+        return get_urls_from_sitemap(ORIGIN_URL)[:2000]
+    except Exception as e:
+        print("sitemap fallback:", e, file=sys.stderr)
+        return [ORIGIN_URL]
+
+# --- PSI API で URL ごとに FieldData を取得 -----------
+def psi_field_status(url, key):
+    psi = "https://www.googleapis.com/pagespeedonline/v5/runPagespeed"
+    params = {
+        "url": url,
+        "key": key,
+        "category": "performance",
+        "strategy": "desktop"
+    }
+    try:
+        data = requests.get(psi, params=params, timeout=30).json()
+        fd = data["loadingExperience"]["metrics"]
+        lcp = fd["LARGEST_CONTENTFUL_PAINT_MS"]["percentile"] / 1000
+        cls = fd["CUMULATIVE_LAYOUT_SHIFT_SCORE"]["percentile"] / 100
+        inp = fd["INP"]["percentile"] / 1000
+        if lcp > 4 or cls > 0.25 or inp > 0.5:
+            return "poor"
+        if lcp > 2.5 or cls > 0.1 or inp > 0.2:
+            return "ni"
+        return "good"
+    except Exception as e:
+        print(f"PSI error for {url}: {e}", file=sys.stderr)
+        return "ni"  # 取得失敗は NI 扱い
+
 def main():
     today = datetime.date.today().isoformat()
-    # 1. データ取得
+    urls = load_candidate_urls()
+    PSI_API_KEY = os.getenv("PSI_API_KEY") or CRUX_API_KEY  # 互換性のため
+
+    # 1. データ取得 (CrUX origin)
     mob_metrics = fetch_crux("PHONE")
     pc_metrics  = fetch_crux("DESKTOP")
-    # --- 確率論的近似で割合計算 ---
     mob_pct = aggregate_probabilistic(mob_metrics)
     pc_pct  = aggregate_probabilistic(pc_metrics)
 
-    # 2. 履歴を一度読み込んで分母を自動更新
-    df_dummy = pd.read_csv(DATA_CSV) if DATA_CSV.exists() else pd.DataFrame()
-    auto_total(df_dummy, [round(x) for x in mob_pct], [round(x) for x in pc_pct])
+    # 2. PSI API で URL 単位のステータス計算
+    statuses = []
+    for i, u in enumerate(urls):
+        statuses.append(psi_field_status(u, PSI_API_KEY))
+        time.sleep(0.6)  # 1分100req制限 (60/100=0.6s)
+    TOTAL_COUNT = len(statuses)
+    mob_vals = (statuses.count("good"), statuses.count("ni"), statuses.count("poor"))
+    pc_vals  = mob_vals  # originベースなら同一。必要ならstrategy="mobile"で再取得
 
-    # 3. 件数換算（更新後の TOTAL_COUNT を使用）
-    mob_vals = to_counts(mob_pct)
-    pc_vals  = to_counts(pc_pct)
+    poor_urls = [u for u, s in zip(urls, statuses) if s == "poor"]
 
-    # 4. 履歴更新 & グラフ生成
+    # 3. 履歴更新 & グラフ生成
     df = update_history(today, mob_vals, pc_vals)
     plot_chart(df)
 
-    # 3. Slack へ投稿
+    # 4. Slack へ投稿
     def fmt(vals):
-        if TOTAL_COUNT:  # 件数表示
+        if TOTAL_COUNT:
             return f"良好 {vals[0]} 件 / 改善 {vals[1]} 件 / 不良 {vals[2]} 件"
         return f"{vals[0]:.1f}% good, {vals[1]:.1f}% needs‑improve, {vals[2]:.1f}% poor"
     msg = (
@@ -219,6 +265,11 @@ def main():
         f"• モバイル:  {fmt(mob_vals)}\n"
         f"• デスクトップ: {fmt(pc_vals)}"
     )
+    if poor_urls:
+        extra = "\n".join(f"• <{u}>" for u in poor_urls[:20])
+        if len(poor_urls) > 20:
+            extra += f"\n…他 {len(poor_urls)-20} 件"
+        msg += f"\n\n*⚠️ Poor 判定 URL:*\n{extra}"
     post_slack(msg, CHART_FILE)
 
 if __name__ == "__main__":
