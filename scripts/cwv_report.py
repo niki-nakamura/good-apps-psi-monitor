@@ -73,7 +73,7 @@ def query_history(ff: str, periods: int = 4):
     return r.json()["record"]["metrics"]
 
 # ─── Slack 送信用ヘルパ ──────────────────────────────
-HDR = {"Authorization": f"Bearer {BOT}", "Content-Type": "application/json;charset=utf-8"}
+HDR = {"Authorization": f"Bearer {BOT}"}  # Content-Type は requests に任せる
 
 def send_text(webhook: str, text: str) -> None:
     r = requests.post(webhook, json={"text": text}, timeout=30)
@@ -84,7 +84,7 @@ def upload_png(buf: io.BytesIO, title: str = "CWV Trend") -> None:
     meta = {"filename": "cwv.png", "length": size, "title": title}
     # 1) 一時 URL を取得
     res = requests.post("https://slack.com/api/files.getUploadURLExternal",
-                        headers=HDR, json=meta, timeout=30).json()
+                        headers=HDR, data=meta, timeout=30).json()
     if not res.get("ok"):
         raise RuntimeError("getUploadURLExternal failed: " + res.get("error", ""))
     upload_url, file_id = res["upload_url"], res["file_id"]
@@ -98,7 +98,7 @@ def upload_png(buf: io.BytesIO, title: str = "CWV Trend") -> None:
             "channel_id": CHAN,
             "initial_comment": title}
     res2 = requests.post("https://slack.com/api/files.completeUploadExternal",
-                         headers=HDR, json=comp, timeout=30).json()
+                         headers=HDR, data=comp, timeout=30).json()
     if not res2.get("ok"):
         raise RuntimeError("completeUploadExternal failed: " + res2.get("error", ""))
 
