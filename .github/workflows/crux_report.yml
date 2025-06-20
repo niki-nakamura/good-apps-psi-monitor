@@ -1,5 +1,8 @@
 name: CWV Daily Report
 
+permissions:
+  contents: write
+
 on:
   schedule:
     # 毎日 0:00 UTC = 日本標準時 09:00

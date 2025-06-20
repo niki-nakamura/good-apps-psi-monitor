@@ -24,6 +24,10 @@ SLACK_WEBHOOK = os.getenv("SLACK_WEBHOOK_URL")  # トークンが無い場合の
 DATA_CSV      = pathlib.Path("data/cwv_history.csv")
 CHART_FILE    = pathlib.Path("cwv_chart.png")
 
+# --- ここで出力用ディレクトリを確実に作成 ---
+DATA_CSV.parent.mkdir(parents=True, exist_ok=True)
+# --------------------------------------------------
+
 if not CRUX_API_KEY:
     print("ERROR: CRUX_API_KEY not set", file=sys.stderr)
     sys.exit(1)
