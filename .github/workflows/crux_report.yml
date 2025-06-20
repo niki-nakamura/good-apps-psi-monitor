@@ -1,28 +1,27 @@
 name: CrUX Web Vitals Report
 
 on:
-  schedule:
-    - cron: '0 23 * * *'
-  workflow_dispatch:
+  schedule:    # JST 08:00 (= 23:00 UTC 前日)
+    - cron:  '0 23 * * *'
+  workflow_dispatch: {}
 
 jobs:
   report:
     runs-on: ubuntu-latest
+    env:
+      CRUX_API_KEY:      ${{ secrets.CRUX_API_KEY }}
+      SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+      ORIGIN: "https://good-apps.jp"
+      SITEMAP_URL: "https://good-apps.jp/sitemap.xml"
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v3
-        with:
-          python-version: '3.10'
+        uses: actions/setup-python@v5
+        with: { python-version: '3.11' }
 
-      - name: Install Dependencies
-        run: pip install requests
+      - name: Install deps
+        run: python -m pip install --no-cache-dir requests matplotlib pillow
 
-      - name: Run CrUX Report Script
-        env:
-          CRUX_API_KEY: ${{ secrets.CRUX_API_KEY }}
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-          ORIGIN: "https://good-apps.jp"
+      - name: Run CWV daily reporter
         run: python scripts/cwv_report.py
