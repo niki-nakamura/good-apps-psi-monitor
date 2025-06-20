@@ -175,6 +175,8 @@ def post_slack(text: str, file_path: pathlib.Path):
     if SLACK_TOKEN:
         client = WebClient(token=SLACK_TOKEN)
         try:
+            # TODO: files_upload は 2025-11-12 廃止予定
+            # 新API: files_getUploadURLExternal / files_completeUploadExternal への移行を検討
             client.files_upload(
                 channels=SLACK_CH,
                 file=str(file_path),
@@ -193,26 +195,40 @@ def post_slack(text: str, file_path: pathlib.Path):
 
 # --- サイトマップから URL を収集 -----------------
 def collect_all_sitemaps(origin):
-    """sitemap_index.xml または sitemap.xml から全URLを収集（最大4000件）"""
-    urls = []
-    index_url = urllib.parse.urljoin(origin, "/sitemap_index.xml")
-    try:
-        r = requests.get(index_url, timeout=30)
-        if r.status_code == 200:
-            root = ET.fromstring(r.text)
-            submaps = [sm.text for sm in root.iter("{*}loc")]
-        else:
-            submaps = [urllib.parse.urljoin(origin, "/sitemap.xml")]
-    except Exception:
-        submaps = [urllib.parse.urljoin(origin, "/sitemap.xml")]
-    for sm in submaps:
+    """sitemap_index.xml または sitemap.xml から全URLを収集（最大4000件, 再帰対応）"""
+    def get_urls_from_sitemap(sitemap_url, seen):
+        urls = []
+        if sitemap_url in seen:
+            return urls
+        seen.add(sitemap_url)
         try:
-            doc = requests.get(sm, timeout=30).text
-            root = ET.fromstring(doc)
-            urls += [loc.text for loc in root.iter("{*}loc")]
+            r = requests.get(sitemap_url, timeout=30)
+            if r.status_code != 200:
+                return urls
+            root = ET.fromstring(r.text)
+            # sitemapindex or urlset
+            if root.tag.endswith("sitemapindex"):
+                for loc in root.iter("{*}loc"):
+                    child_url = loc.text.strip()
+                    urls += get_urls_from_sitemap(child_url, seen)
+            else:
+                urls += [loc.text.strip() for loc in root.iter("{*}loc")]
         except Exception as e:
-            print(f"sitemap parse error: {sm} {e}", file=sys.stderr)
-    return urls[:4000]
+            print(f"sitemap parse error: {sitemap_url} {e}", file=sys.stderr)
+        return urls
+
+    # sitemap_index.xml優先、なければsitemap.xml
+    index_url = urllib.parse.urljoin(origin, "/sitemap_index.xml")
+    xml_urls = []
+    try:
+        r = requests.get(index_url, timeout=10)
+        if r.status_code == 200:
+            xml_urls = get_urls_from_sitemap(index_url, set())
+        else:
+            xml_urls = get_urls_from_sitemap(urllib.parse.urljoin(origin, "/sitemap.xml"), set())
+    except Exception:
+        xml_urls = get_urls_from_sitemap(urllib.parse.urljoin(origin, "/sitemap.xml"), set())
+    return xml_urls[:4000]
 
 def psi_field_status(url, key, strategy):
     """PSI API で指定 strategy の FieldData を取得し GSC 方式で判定。FieldData 無ければ 'nodata'"""
@@ -221,7 +237,8 @@ def psi_field_status(url, key, strategy):
         "url": url,
         "key": key,
         "category": "performance",
-        "strategy": strategy
+        "strategy": strategy,
+        "originFallback": "true"  # ← 推奨: 欠損時はオリジン平均を返す
     }
     try:
         data = requests.get(psi, params=params, timeout=30).json()
@@ -229,11 +246,10 @@ def psi_field_status(url, key, strategy):
         if "loadingExperience" not in data or "metrics" not in data["loadingExperience"]:
             return "nodata"
         fd = data["loadingExperience"]["metrics"]
-        # p75値取得
+        # どれか1つでも値が無ければ除外
         lcp = fd["LARGEST_CONTENTFUL_PAINT_MS"]["percentile"] / 1000 if "LARGEST_CONTENTFUL_PAINT_MS" in fd else None
         cls = fd["CUMULATIVE_LAYOUT_SHIFT_SCORE"]["percentile"] / 100 if "CUMULATIVE_LAYOUT_SHIFT_SCORE" in fd else None
         inp = fd["INP"]["percentile"] / 1000 if "INP" in fd else None
-        # どれか1つでも値が無ければ除外
         if lcp is None or cls is None or inp is None:
             return "nodata"
         # GSC方式: 最も悪いステータスを採用
@@ -284,20 +300,20 @@ def main():
     urls = collect_all_sitemaps(ORIGIN_URL)
     PSI_API_KEY = os.getenv("PSI_API_KEY") or CRUX_API_KEY
 
-    # 1. 各URLごとに mobile/desktop の FieldData を取得
+    # 1. 各URLごとに mobile/desktop の FieldData を取得（両方必須）
     mob_statuses, pc_statuses = [], []
     for i, u in enumerate(urls):
         mob_stat = psi_field_status(u, PSI_API_KEY, "mobile")
         if mob_stat == "nodata":
-            mob_stat = crux_page_status(u, PSI_API_KEY, "mobile")
+            mob_stat = crux_page_status(u, CRUX_API_KEY, "mobile")
         pc_stat = psi_field_status(u, PSI_API_KEY, "desktop")
         if pc_stat == "nodata":
-            pc_stat = crux_page_status(u, PSI_API_KEY, "desktop")
+            pc_stat = crux_page_status(u, CRUX_API_KEY, "desktop")
         mob_statuses.append(mob_stat)
         pc_statuses.append(pc_stat)
         time.sleep(0.6)  # レートリミット対策
 
-    # 2. "nodata" を除外して件数集計
+    # 2. "nodata" を除外して件数集計（GSCと同じ分母）
     mob_valid = [s for s in mob_statuses if s != "nodata"]
     pc_valid  = [s for s in pc_statuses if s != "nodata"]
     mob_vals = (mob_valid.count("good"), mob_valid.count("ni"), mob_valid.count("poor"))

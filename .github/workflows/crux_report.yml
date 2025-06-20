@@ -38,7 +38,6 @@ jobs:
           SLACK_CHANNEL_ID:  ${{ secrets.SLACK_CHANNEL_ID }}
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}  # 未設定なら空
           ORIGIN_URL:        "https://good-apps.jp"
-          URL_TOTAL_COUNT:   "1200"          # 観測できるURL総数 (目安)。必要に応じて調整
         run: python scripts/cwv_report.py
 
       - name: Commit updated history (if changed)
@@ -49,4 +48,5 @@ jobs:
             git add data/cwv_history.csv
             git commit -m "Update CWV history ($(date '+%Y-%m-%d'))"
             git push
+          fi
           fi
