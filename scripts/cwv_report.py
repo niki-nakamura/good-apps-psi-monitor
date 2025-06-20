@@ -115,11 +115,11 @@ def upload_png(buf: io.BytesIO, title: str = "CWV Trend") -> None:
     # 3) 完了 & チャンネル共有
     comp = {
         "files": [{"id": file_id}],
-        "channels": [CHAN],  # channel_id → channels (list)
+        "channels": CHAN,  # <-- fix: should be a comma-separated string, not a list
         "initial_comment": title
     }
     res2 = requests.post("https://slack.com/api/files.completeUploadExternal",
-                         headers=HDR, data=comp, timeout=30).json()
+                         headers=HDR, json=comp, timeout=30).json()  # <-- fix: use json=comp
     if not res2.get("ok"):
         raise RuntimeError("completeUploadExternal failed: " + res2.get("error", ""))
 
