@@ -20,13 +20,26 @@ ORIGIN_URL    = os.getenv("ORIGIN_URL", "https://good-apps.jp")
 TOTAL_COUNT   = int(os.getenv("URL_TOTAL_COUNT", "0"))  # 0 なら割合のみ
 SLACK_TOKEN   = os.getenv("SLACK_BOT_TOKEN")
 SLACK_CH      = os.getenv("SLACK_CHANNEL_ID")
-SLACK_WEBHOOK = os.getenv("SLACK_WEBHOOK_URL")  # トークンが無い場合のフォールバック
-DATA_CSV      = pathlib.Path("data/cwv_history.csv")
+SLACK_WEBHOOK = os.getenv("SLACK_WEBHOOK_URL")
+
+DATA_CSV      = pathlib.Path("data/cwv_history.csv")    # ← 先に宣言
 CHART_FILE    = pathlib.Path("cwv_chart.png")
 
-# --- ここで出力用ディレクトリを確実に作成 ---
+# --- 出力用ディレクトリを確実に作成 (定義後なので OK) ---
 DATA_CSV.parent.mkdir(parents=True, exist_ok=True)
-# --------------------------------------------------
+
+# ❶ 分母を動的に更新 -------------------------------------
+def auto_total(df, mob_vals, pc_vals):
+    """履歴と今日の値から最大総数を推定し環境変数に保存"""
+    global TOTAL_COUNT
+    today_total = max(sum(mob_vals), sum(pc_vals))
+    if TOTAL_COUNT == 0:
+        TOTAL_COUNT = max(today_total, df[["mobile_good","mobile_ni","mobile_poor",
+                                           "desktop_good","desktop_ni","desktop_poor"]].sum(axis=1).max() if not df.empty else 0)
+        TOTAL_COUNT = max(TOTAL_COUNT, today_total)
+    elif TOTAL_COUNT < today_total:
+        TOTAL_COUNT = today_total
+    return TOTAL_COUNT
 
 if not CRUX_API_KEY:
     print("ERROR: CRUX_API_KEY not set", file=sys.stderr)
@@ -78,6 +91,30 @@ def aggregate(metrics: dict) -> Tuple[float, float, float]:
     ni    = max(0.0, 100.0 - good - poor)  # 誤差吸収
     return round(good, 2), round(ni, 2), round(poor, 2)
 
+def aggregate_probabilistic(metrics: dict) -> Tuple[float, float, float]:
+    """
+    3指標のヒストグラムから
+      * 良好% = Π(good_i)
+      * 不良% = 1 - Π(1 - poor_i)
+      * 改善% = 100 - 良好% - 不良%
+    を求める（確率論的近似）
+    """
+    goods = []
+    poors = []
+    for key in ("largest_contentful_paint", "interaction_to_next_paint", "cumulative_layout_shift"):
+        g, ni, p = parse_histogram(metrics.get(key, {}))
+        goods.append(g/100)
+        poors.append(p/100)
+    good = 1
+    for g in goods:
+        good *= g
+    not_poor = 1
+    for p in poors:
+        not_poor *= (1 - p)
+    poor = 1 - not_poor
+    ni = max(0.0, 1.0 - good - poor)
+    return round(good*100, 2), round(ni*100, 2), round(poor*100, 2)
+
 def to_counts(percentages):
     if TOTAL_COUNT == 0:
         return percentages
@@ -102,20 +139,31 @@ def update_history(date_str, mob_vals, pc_vals):
     return df
 
 def plot_chart(df: pd.DataFrame):
-    plt.figure(figsize=(10, 6))
+    if df.empty:
+        return  # データが無い場合はスキップ
+
+    # --- 数値型に強制変換（object → float/Int） ---
+    numeric_cols = df.columns.drop("date")
+    df[numeric_cols] = df[numeric_cols].apply(pd.to_numeric, errors="coerce")
+
     x = pd.to_datetime(df["date"])
-    for label, col in [("良好 (Mobile)", "mobile_good"),
-                       ("改善 (Mobile)", "mobile_ni"),
-                       ("不良 (Mobile)", "mobile_poor"),
-                       ("良好 (Desktop)", "desktop_good"),
-                       ("改善 (Desktop)", "desktop_ni"),
-                       ("不良 (Desktop)", "desktop_poor")]:
-        plt.plot(x, df[col], label=label, linewidth=2)
+    plt.figure(figsize=(10, 6), dpi=150)          # ← 解像度も上げる
+    styles = {"mobile_good":"o-", "mobile_ni":"^-", "mobile_poor":"s-",
+              "desktop_good":"o--", "desktop_ni":"^--", "desktop_poor":"s--"}
+
+    for col, style in styles.items():
+        if df[col].notna().any():                 # 全て NaN の列は描かない
+            plt.plot(x, df[col], style, linewidth=2, markersize=4, label=col.replace("_", " ").title())
+
+    if len(df) == 1:                              # 1日分しか無い場合は散布図でも描く
+        for col in numeric_cols:
+            plt.scatter(x, df[col], s=40)
+
     plt.title("Core Web Vitals URL 状態 – 直近28日")
     plt.ylabel("URL 件数" if TOTAL_COUNT else "割合 (%)")
     plt.xlabel("Date")
     plt.xticks(rotation=45)
-    plt.legend(ncol=2, fontsize=8)
+    plt.legend(fontsize=8, ncol=2)
     plt.tight_layout()
     plt.savefig(CHART_FILE)
     plt.close()
@@ -145,13 +193,19 @@ def main():
     # 1. データ取得
     mob_metrics = fetch_crux("PHONE")
     pc_metrics  = fetch_crux("DESKTOP")
-    mob_pct = aggregate(mob_metrics)
-    pc_pct  = aggregate(pc_metrics)
+    # --- 確率論的近似で割合計算 ---
+    mob_pct = aggregate_probabilistic(mob_metrics)
+    pc_pct  = aggregate_probabilistic(pc_metrics)
 
+    # 2. 履歴を一度読み込んで分母を自動更新
+    df_dummy = pd.read_csv(DATA_CSV) if DATA_CSV.exists() else pd.DataFrame()
+    auto_total(df_dummy, [round(x) for x in mob_pct], [round(x) for x in pc_pct])
+
+    # 3. 件数換算（更新後の TOTAL_COUNT を使用）
     mob_vals = to_counts(mob_pct)
     pc_vals  = to_counts(pc_pct)
 
-    # 2. 履歴更新 & グラフ生成
+    # 4. 履歴更新 & グラフ生成
     df = update_history(today, mob_vals, pc_vals)
     plot_chart(df)
 
