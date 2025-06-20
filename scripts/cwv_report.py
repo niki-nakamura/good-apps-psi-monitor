@@ -58,6 +58,25 @@ def url_total() -> int:
     xml = requests.get(SITEMAP, timeout=30).text
     return sum(1 for n in ET.fromstring(xml).iter() if n.tag.endswith("loc"))
 
+def get_all_urls_from_sitemap() -> list[str]:
+    xml = requests.get(SITEMAP, timeout=30).text
+    return [n.text for n in ET.fromstring(xml).iter() if n.tag.endswith("loc")]
+
+def is_url_poor(url: str) -> bool:
+    body = {"url": url}
+    try:
+        r = requests.post(f"{API}/records:queryRecord?key={KEY}", json=body, timeout=30)
+        r.raise_for_status()
+        metrics = r.json().get("record", {}).get("metrics", {})
+        for m, v in metrics.items():
+            if m in THRESHOLDS and v.get("histogram"):
+                classified = classify(v["histogram"], m)
+                if classified["poor"] > 0.0:
+                    return True
+        return False
+    except Exception:
+        return False
+
 # ─── CrUX API 呼び出し ────────────────────────────────
 def query_daily(ff: str):
     body = {"origin": ORIGIN, "formFactor": ff}
@@ -107,6 +126,13 @@ total_urls = url_total()
 forms      = {"PHONE": "Mobile", "DESKTOP": "PC"}
 today, trend = {}, {}
 
+# 不良URL抽出
+all_urls = get_all_urls_from_sitemap()
+poor_urls = []
+for url in all_urls:
+    if is_url_poor(url):
+        poor_urls.append(url)
+
 for ff, label in forms.items():
     # 日次値
     daily = query_daily(ff)
@@ -146,6 +172,11 @@ for label, (p, c) in today.items():
     lines.append(f"*{label}* → 良好 {p['good']} % ({c['good']}件) | "
                  f"改善 {p['ni']} % ({c['ni']}件) | "
                  f"不良 {p['poor']} % ({c['poor']}件)")
+
+# 不良URLリストを添付
+if poor_urls:
+    lines.append("\n*Poor URLs* (一部抜粋):")
+    lines.extend(poor_urls[:20])  # 長すぎる場合は20件まで表示
 
 # テキスト → Webhook
 send_text(WEBHOOK, "\n".join(lines))
