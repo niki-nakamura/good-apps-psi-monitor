@@ -9,6 +9,8 @@
 
 import os, sys, json, datetime, pathlib, requests
 import pandas as pd
+import matplotlib
+matplotlib.rcParams["font.family"] = "Noto Sans CJK JP"  # 日本語フォント指定
 import matplotlib.pyplot as plt
 from typing import Tuple
 from slack_sdk import WebClient
