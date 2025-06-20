@@ -113,9 +113,11 @@ def upload_png(buf: io.BytesIO, title: str = "CWV Trend") -> None:
                  headers={"Content-Type": "image/png"}, timeout=30).raise_for_status()
 
     # 3) 完了 & チャンネル共有
-    comp = {"files": [{"id": file_id}],
-            "channel_id": CHAN,
-            "initial_comment": title}
+    comp = {
+        "files": [{"id": file_id}],
+        "channels": [CHAN],  # channel_id → channels (list)
+        "initial_comment": title
+    }
     res2 = requests.post("https://slack.com/api/files.completeUploadExternal",
                          headers=HDR, data=comp, timeout=30).json()
     if not res2.get("ok"):
@@ -173,9 +175,9 @@ for label, (p, c) in today.items():
                  f"改善 {p['ni']} % ({c['ni']}件) | "
                  f"不良 {p['poor']} % ({c['poor']}件)")
 
-# 不良URLリストを添付
+# 不良URLリストを添付（件数も明示）
 if poor_urls:
-    lines.append("\n*Poor URLs* (一部抜粋):")
+    lines.append(f"\n*Poor URLs* ({len(poor_urls)}件, 一部抜粋):")
     lines.extend(poor_urls[:20])  # 長すぎる場合は20件まで表示
 
 # テキスト → Webhook
