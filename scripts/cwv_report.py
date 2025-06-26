@@ -119,6 +119,44 @@ def aggregate_probabilistic(metrics: dict) -> Tuple[float, float, float]:
     ni = max(0.0, 1.0 - good - poor)
     return round(good*100, 2), round(ni*100, 2), round(poor*100, 2)
 
+def aggregate_probabilistic_strict(metrics: dict) -> Tuple[float, float, float]:
+    """
+    3指標のヒストグラムから
+      * 良好% = Π(good_i)
+      * 不良% = 1 - Π(1 - strict_poor_i)
+      * 改善% = 100 - 良好% - 不良%
+    を求める（閾値を厳しく:LCP>3.0, INP>0.3, CLS>0.15）
+    """
+    goods = []
+    strict_poors = []
+    for key, strict_th in zip(
+        ("largest_contentful_paint", "interaction_to_next_paint", "cumulative_layout_shift"),
+        (3.0, 0.3, 0.15)):
+        metric = metrics.get(key, {})
+        bins = metric.get("histogram", [])
+        # good: 公式good bin
+        g = bins[0]["density"] if len(bins) > 0 else 0
+        goods.append(g)
+        # strict poor: 厳しめ閾値を超えるbinの合計
+        strict_poor = 0
+        for b in bins:
+            if key=="largest_contentful_paint" and b.get("start",0)>=3.0*1000:
+                strict_poor += b["density"]
+            elif key=="interaction_to_next_paint" and b.get("start",0)>=0.3*1000:
+                strict_poor += b["density"]
+            elif key=="cumulative_layout_shift" and b.get("start",0)>=0.15:
+                strict_poor += b["density"]
+        strict_poors.append(strict_poor)
+    good = 1
+    for g in goods:
+        good *= g
+    not_poor = 1
+    for p in strict_poors:
+        not_poor *= (1 - p)
+    poor = 1 - not_poor
+    ni = max(0.0, 1.0 - good - poor)
+    return round(good*100,2), round(ni*100,2), round(poor*100,2)
+
 def to_counts(percentages):
     if TOTAL_COUNT == 0:
         return percentages
@@ -258,8 +296,8 @@ def main():
     today = datetime.date.today().isoformat()
     mob_metrics = fetch_crux("PHONE")
     pc_metrics  = fetch_crux("DESKTOP")
-    mob_pct = aggregate_probabilistic(mob_metrics)
-    pc_pct  = aggregate_probabilistic(pc_metrics)
+    mob_pct = aggregate_probabilistic_strict(mob_metrics)
+    pc_pct  = aggregate_probabilistic_strict(pc_metrics)
     mob_vals = to_counts(mob_pct)
     pc_vals  = to_counts(pc_pct)
     mob_good, mob_ni, mob_poor = mob_pct
