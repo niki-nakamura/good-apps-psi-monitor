@@ -195,6 +195,37 @@ def post_slack(text: str, file_path: pathlib.Path):
     else:
         print("No Slack credentials provided", file=sys.stderr)
 
+def get_urls_from_sitemap(origin_url):
+    """サイトマップからURL一覧を取得（最大2000件）"""
+    sitemap_url = urllib.parse.urljoin(origin_url, "/sitemap.xml")
+    try:
+        xml = requests.get(sitemap_url, timeout=30).text
+        root = ET.fromstring(xml)
+        return [n.text for n in root.iter() if n.tag.endswith("loc")][:2000]
+    except Exception as e:
+        print(f"sitemap error: {e}", file=sys.stderr)
+        return []
+
+def is_url_poor(url, form_factor):
+    """CrUXページAPIで指定URLが不良か判定（form_factor=PHONE/DESKTOP）"""
+    api = "https://chromeuxreport.googleapis.com/v1/records:queryRecord"
+    payload = {"url": url, "formFactor": form_factor}
+    try:
+        r = requests.post(f"{api}?key={CRUX_API_KEY}", json=payload, timeout=20)
+        r.raise_for_status()
+        metrics = r.json().get("record", {}).get("metrics", {})
+        for m in ("largest_contentful_paint", "interaction_to_next_paint", "cumulative_layout_shift"):
+            v = metrics.get(m, {})
+            if v.get("histogram"):
+                bins = v["histogram"]
+                poor = bins[2]["density"] if len(bins) > 2 else 0
+                if poor > 0.0:
+                    return True
+        return False
+    except Exception as e:
+        print(f"crux page error: {url} {e}", file=sys.stderr)
+        return False
+
 def main():
     today = datetime.date.today().isoformat()
     # 1. CrUX API からモバイル/デスクトップのヒストグラムを取得
@@ -207,11 +238,16 @@ def main():
     mob_vals = to_counts(mob_pct)
     pc_vals  = to_counts(pc_pct)
 
-    # 3. 履歴更新 & グラフ生成
+    # 3. 不良URLリスト抽出（最大20件）
+    urls = get_urls_from_sitemap(ORIGIN_URL)
+    poor_urls_mob = [u for u in urls if is_url_poor(u, "PHONE")][:20]
+    poor_urls_pc  = [u for u in urls if is_url_poor(u, "DESKTOP")][:20]
+
+    # 4. 履歴更新 & グラフ生成
     df = update_history(today, mob_vals, pc_vals)
     plot_chart(df)
 
-    # 4. Slack へ投稿
+    # 5. Slack へ投稿
     def fmt(vals):
         if TOTAL_COUNT:
             return f"良好 {vals[0]} 件 / 改善 {vals[1]} 件 / 不良 {vals[2]} 件"
@@ -221,6 +257,10 @@ def main():
         f"• モバイル:  {fmt(mob_vals)}\n"
         f"• デスクトップ: {fmt(pc_vals)}"
     )
+    if poor_urls_mob:
+        msg += f"\n\n*モバイル不良URL* (一部):\n" + "\n".join(poor_urls_mob)
+    if poor_urls_pc:
+        msg += f"\n\n*デスクトップ不良URL* (一部):\n" + "\n".join(poor_urls_pc)
     post_slack(msg, CHART_FILE)
 
 if __name__ == "__main__":
