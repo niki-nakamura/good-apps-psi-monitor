@@ -15,12 +15,8 @@ import matplotlib.pyplot as plt
 from typing import Tuple
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
-import xml.etree.ElementTree as ET
-import urllib.parse
 import time
 import logging
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
 
 ##### 環境変数 #####
 CRUX_API_KEY  = os.getenv("CRUX_API_KEY")
@@ -241,6 +237,23 @@ def ensure_dummy_png(path="empty.png"):
         import matplotlib.pyplot as plt
         plt.figure(figsize=(1,1)); plt.axis("off"); plt.savefig(path); plt.close()
 
+# --- Slack送信（旧API） ---
+def post_slack(text: str, file_path: pathlib.Path):
+    if SLACK_TOKEN:
+        client = WebClient(token=SLACK_TOKEN)
+        try:
+            client.files_upload(
+                channels=SLACK_CH,
+                file=str(file_path),
+                title="CWV Report",
+                initial_comment=text,
+            )
+        except SlackApiError as e:
+            print(f"Slack API error: {e.response['error']}", file=sys.stderr)
+    elif SLACK_WEBHOOK:
+        payload = {"text": text + "\n(画像アップロードには Bot Token が必要です)"}
+        requests.post(SLACK_WEBHOOK, json=payload, timeout=10)
+
 def main():
     today = datetime.date.today().isoformat()
     mob_metrics = fetch_crux("PHONE")
@@ -249,39 +262,16 @@ def main():
     pc_pct  = aggregate_probabilistic(pc_metrics)
     mob_vals = to_counts(mob_pct)
     pc_vals  = to_counts(pc_pct)
-
-    def fmt(vals):
-        if TOTAL_COUNT:
-            return f"良好 {vals[0]} 件 / 改善 {vals[1]} 件 / 不良 {vals[2]} 件"
-        return f"良好 {vals[0]:.1f}% / 改善 {vals[1]:.1f}% / 不良 {vals[2]:.1f}%"
+    mob_good, mob_ni, mob_poor = mob_pct
+    pc_good, pc_ni, pc_poor = pc_pct
     msg = (
-        f"Core Web Vitals – {today}\n"
-        f"• モバイル:  {fmt(mob_vals)}\n"
-        f"• デスクトップ: {fmt(pc_vals)}\n"
-        f"CWV Report"
+        f"*Core Web Vitals – {today}*\n"
+        f"• モバイル:  良好 {mob_good:.1f}% / 改善 {mob_ni:.1f}% / 不良 {mob_poor:.1f}%\n"
+        f"• デスクトップ: 良好 {pc_good:.1f}% / 改善 {pc_ni:.1f}% / 不良 {pc_poor:.1f}%\n"
+        "CWV Report"
     )
     plot_chart(update_history(today, mob_vals, pc_vals))
     post_slack(msg, CHART_FILE)
 
 if __name__ == "__main__":
     main()
-
-# --- Slack送信をfiles_upload()に戻す ---
-def post_slack(text: str, file_path: pathlib.Path | None = None) -> None:
-    if not SLACK_TOKEN:
-        logging.warning("Slack disabled – no token")
-        return
-    client = WebClient(token=SLACK_TOKEN)
-    try:
-        if file_path and file_path.exists():
-            client.files_upload(
-                channels=SLACK_CH,
-                file=str(file_path),
-                title="CWV Report",
-                initial_comment=text,
-            )
-        else:
-            client.chat_postMessage(channel=SLACK_CH, text=text)
-    except SlackApiError as e:
-        logging.error("Slack API error: %s – %s", e.response['error'], text)
-        return
