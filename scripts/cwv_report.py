@@ -195,153 +195,32 @@ def post_slack(text: str, file_path: pathlib.Path):
     else:
         print("No Slack credentials provided", file=sys.stderr)
 
-# --- サイトマップから URL を収集 -----------------
-def collect_all_sitemaps(origin):
-    """sitemap_index.xml または sitemap.xml から全URLを収集（最大4000件, 再帰対応）"""
-    def get_urls_from_sitemap(sitemap_url, seen):
-        urls = []
-        if sitemap_url in seen:
-            return urls
-        seen.add(sitemap_url)
-        try:
-            r = requests.get(sitemap_url, timeout=30)
-            if r.status_code != 200:
-                return urls
-            root = ET.fromstring(r.text)
-            # sitemapindex or urlset
-            if root.tag.endswith("sitemapindex"):
-                for loc in root.iter("{*}loc"):
-                    child_url = loc.text.strip()
-                    urls += get_urls_from_sitemap(child_url, seen)
-            else:
-                urls += [loc.text.strip() for loc in root.iter("{*}loc")]
-        except Exception as e:
-            print(f"sitemap parse error: {sitemap_url} {e}", file=sys.stderr)
-        return urls
-
-    # sitemap_index.xml優先、なければsitemap.xml
-    index_url = urllib.parse.urljoin(origin, "/sitemap_index.xml")
-    xml_urls = []
-    try:
-        r = requests.get(index_url, timeout=10)
-        if r.status_code == 200:
-            xml_urls = get_urls_from_sitemap(index_url, set())
-        else:
-            xml_urls = get_urls_from_sitemap(urllib.parse.urljoin(origin, "/sitemap.xml"), set())
-    except Exception:
-        xml_urls = get_urls_from_sitemap(urllib.parse.urljoin(origin, "/sitemap.xml"), set())
-    return xml_urls[:4000]
-
-def psi_field_status(url, key, strategy):
-    """PSI API で指定 strategy の FieldData を取得し GSC 方式で判定。FieldData 無ければ 'nodata'"""
-    psi = "https://www.googleapis.com/pagespeedonline/v5/runPagespeed"
-    params = {
-        "url": url,
-        "key": key,
-        "category": "performance",
-        "strategy": strategy,
-        "originFallback": "true"  # ← 推奨: 欠損時はオリジン平均を返す
-    }
-    try:
-        data = requests.get(psi, params=params, timeout=30).json()
-        # FieldDataが無い場合は除外
-        if "loadingExperience" not in data or "metrics" not in data["loadingExperience"]:
-            return "nodata"
-        fd = data["loadingExperience"]["metrics"]
-        # どれか1つでも値が無ければ除外
-        lcp = fd["LARGEST_CONTENTFUL_PAINT_MS"]["percentile"] / 1000 if "LARGEST_CONTENTFUL_PAINT_MS" in fd else None
-        cls = fd["CUMULATIVE_LAYOUT_SHIFT_SCORE"]["percentile"] / 100 if "CUMULATIVE_LAYOUT_SHIFT_SCORE" in fd else None
-        inp = fd["INP"]["percentile"] / 1000 if "INP" in fd else None
-        if lcp is None or cls is None or inp is None:
-            return "nodata"
-        # GSC方式: 最も悪いステータスを採用
-        status = "good"
-        if lcp > 4 or inp > 0.5 or cls > 0.25:
-            status = "poor"
-        elif lcp > 2.5 or inp > 0.2 or cls > 0.1:
-            status = "ni"
-        return status
-    except Exception as e:
-        print(f"PSI error for {url} ({strategy}): {e}", file=sys.stderr)
-        return "nodata"
-
-def crux_page_status(url, key, strategy):
-    """CrUX ページレベル API fallback（PSIでnodata時のみ呼ぶ）"""
-    api = "https://chromeuxreport.googleapis.com/v1/records:queryRecord"
-    payload = {
-        "url": url,
-        "formFactor": "PHONE" if strategy == "mobile" else "DESKTOP"
-    }
-    try:
-        r = requests.post(f"{api}?key={key}", json=payload, timeout=30)
-        r.raise_for_status()
-        metrics = r.json().get("record", {}).get("metrics", {})
-        # p75値取得
-        def get_p75(metric, key):
-            return metric.get("percentiles", {}).get("p75")
-        lcp = get_p75(metrics.get("largest_contentful_paint", {}), "p75")
-        inp = get_p75(metrics.get("interaction_to_next_paint", {}), "p75")
-        cls = get_p75(metrics.get("cumulative_layout_shift", {}), "p75")
-        if lcp is None or inp is None or cls is None:
-            return "nodata"
-        lcp = lcp / 1000
-        inp = inp / 1000
-        cls = cls / 100
-        status = "good"
-        if lcp > 4 or inp > 0.5 or cls > 0.25:
-            status = "poor"
-        elif lcp > 2.5 or inp > 0.2 or cls > 0.1:
-            status = "ni"
-        return status
-    except Exception as e:
-        print(f"CrUX page error for {url} ({strategy}): {e}", file=sys.stderr)
-        return "nodata"
-
 def main():
     today = datetime.date.today().isoformat()
-    urls = collect_all_sitemaps(ORIGIN_URL)
-    PSI_API_KEY = os.getenv("PSI_API_KEY") or CRUX_API_KEY
+    # 1. CrUX API からモバイル/デスクトップのヒストグラムを取得
+    mob_metrics = fetch_crux("PHONE")
+    pc_metrics  = fetch_crux("DESKTOP")
+    mob_pct = aggregate(mob_metrics)
+    pc_pct  = aggregate(pc_metrics)
 
-    # 1. 各URLごとに mobile/desktop の FieldData を取得（両方必須）
-    mob_statuses, pc_statuses = [], []
-    for i, u in enumerate(urls):
-        mob_stat = psi_field_status(u, PSI_API_KEY, "mobile")
-        if mob_stat == "nodata":
-            mob_stat = crux_page_status(u, CRUX_API_KEY, "mobile")
-        pc_stat = psi_field_status(u, PSI_API_KEY, "desktop")
-        if pc_stat == "nodata":
-            pc_stat = crux_page_status(u, CRUX_API_KEY, "desktop")
-        mob_statuses.append(mob_stat)
-        pc_statuses.append(pc_stat)
-        time.sleep(0.6)  # レートリミット対策
+    # 2. 件数換算（URL_TOTAL_COUNTが0なら割合のみ）
+    mob_vals = to_counts(mob_pct)
+    pc_vals  = to_counts(pc_pct)
 
-    # 2. "nodata" を除外して件数集計（GSCと同じ分母）
-    mob_valid = [s for s in mob_statuses if s != "nodata"]
-    pc_valid  = [s for s in pc_statuses if s != "nodata"]
-    mob_vals = (mob_valid.count("good"), mob_valid.count("ni"), mob_valid.count("poor"))
-    pc_vals  = (pc_valid.count("good"),  pc_valid.count("ni"),  pc_valid.count("poor"))
-    TOTAL_COUNT = len(mob_valid)  # モバイル基準。必要なら両方最大値でもOK
-
-    # 3. 不良URLリスト
-    poor_urls = [u for u, s in zip(urls, mob_statuses) if s == "poor"][:20]
-
-    # 4. 履歴更新 & グラフ生成
+    # 3. 履歴更新 & グラフ生成
     df = update_history(today, mob_vals, pc_vals)
     plot_chart(df)
 
-    # 5. Slack へ投稿
+    # 4. Slack へ投稿
     def fmt(vals):
-        return f"良好 {vals[0]} 件 / 改善 {vals[1]} 件 / 不良 {vals[2]} 件"
+        if TOTAL_COUNT:
+            return f"良好 {vals[0]} 件 / 改善 {vals[1]} 件 / 不良 {vals[2]} 件"
+        return f"良好 {vals[0]:.1f}% / 改善 {vals[1]:.1f}% / 不良 {vals[2]:.1f}%"
     msg = (
         f"*Core Web Vitals – {today}*\n"
         f"• モバイル:  {fmt(mob_vals)}\n"
         f"• デスクトップ: {fmt(pc_vals)}"
     )
-    if poor_urls:
-        extra = "\n".join(f"• <{u}>" for u in poor_urls)
-        if len(poor_urls) == 20:
-            extra += f"\n…他 {mob_valid.count('poor')-20} 件"
-        msg += f"\n\n*⚠️ Poor 判定 URL:*\n{extra}"
     post_slack(msg, CHART_FILE)
 
 if __name__ == "__main__":
