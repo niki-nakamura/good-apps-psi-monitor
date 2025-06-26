@@ -238,10 +238,17 @@ def main():
     mob_vals = to_counts(mob_pct)
     pc_vals  = to_counts(pc_pct)
 
-    # 3. 不良URLリスト抽出（最大20件）
+    # 3. モバイル不良URLリスト抽出（最大20件）
     urls = get_urls_from_sitemap(ORIGIN_URL)
-    poor_urls_mob = [u for u in urls if is_url_poor(u, "PHONE")][:20]
-    poor_urls_pc  = [u for u in urls if is_url_poor(u, "DESKTOP")][:20]
+    poor_urls = []
+    for u in urls:
+        try:
+            if is_url_poor(u, "PHONE"):
+                poor_urls.append(u)
+                if len(poor_urls) >= 20:
+                    break
+        except Exception:
+            continue
 
     # 4. 履歴更新 & グラフ生成
     df = update_history(today, mob_vals, pc_vals)
@@ -257,10 +264,8 @@ def main():
         f"• モバイル:  {fmt(mob_vals)}\n"
         f"• デスクトップ: {fmt(pc_vals)}"
     )
-    if poor_urls_mob:
-        msg += f"\n\n*モバイル不良URL* (一部):\n" + "\n".join(poor_urls_mob)
-    if poor_urls_pc:
-        msg += f"\n\n*デスクトップ不良URL* (一部):\n" + "\n".join(poor_urls_pc)
+    if poor_urls:
+        msg += f"\n\n*不良URL一覧 (モバイル, 最大20件)*:\n" + "\n".join(poor_urls)
     post_slack(msg, CHART_FILE)
 
 if __name__ == "__main__":
