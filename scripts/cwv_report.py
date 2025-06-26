@@ -63,7 +63,9 @@ def fetch_crux(form_factor: str) -> dict:
     }
     res = requests.post(url, json=payload, timeout=30)
     res.raise_for_status()
-    return res.json().get("record", {}).get("metrics", {})
+    data = res.json().get("record", {}).get("metrics", {})
+    logging.info(f"CrUX API response for {form_factor}: {json.dumps(data, indent=2)}")
+    return data
 
 def parse_histogram(metric: dict) -> Tuple[float, float, float]:
     """
@@ -302,18 +304,25 @@ def main():
     today = datetime.date.today().isoformat()
     mob_metrics = fetch_crux("PHONE")
     pc_metrics  = fetch_crux("DESKTOP")
+
+    logging.info("Using strict thresholds for aggregation.")
     mob_pct = aggregate_probabilistic_strict(mob_metrics)
     pc_pct  = aggregate_probabilistic_strict(pc_metrics)
+
     mob_vals = to_counts(mob_pct)
     pc_vals  = to_counts(pc_pct)
     mob_good, mob_ni, mob_poor = mob_pct
     pc_good, pc_ni, pc_poor = pc_pct
+
     msg = (
         f"*Core Web Vitals – {today}*\n"
         f"• モバイル:  良好 {mob_good:.1f}% / 改善 {mob_ni:.1f}% / 不良 {mob_poor:.1f}%\n"
         f"• デスクトップ: 良好 {pc_good:.1f}% / 改善 {pc_ni:.1f}% / 不良 {pc_poor:.1f}%\n"
         "CWV Report"
     )
+
+    logging.info(f"Generated Slack message: {msg}")
+
     plot_chart(update_history(today, mob_vals, pc_vals))
     post_slack(msg, CHART_FILE)
 
