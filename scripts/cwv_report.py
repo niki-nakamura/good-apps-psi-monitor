@@ -257,8 +257,20 @@ def post_slack(text: str, file_path: pathlib.Path = None):
 
 # --- robust sitemap collector ---
 def collect_all_sitemaps(origin: str, limit=4000):
-    """sitemap_index.xml → wp-sitemap.xml → sitemap.xml の順で最大4000件のURLを取得"""
+    """robots.txt, sitemap_index.xml, wp-sitemap.xml, sitemap.xml の順で最大4000件のページURLを取得"""
     import random
+    from urllib.parse import urljoin
+    seen = set()
+    urls = set()
+    # robots.txt から Sitemap 行を抽出
+    try:
+        robots = requests.get(urljoin(origin, "/robots.txt"), timeout=10).text
+        for line in robots.splitlines():
+            if line.lower().startswith("sitemap:"):
+                urls.update(_crawl_sitemap(line.split(":",1)[1].strip(), seen))
+    except Exception as e:
+        logging.warning("[robots skip] %s", e)
+    # fallback: sitemap_index.xml, wp-sitemap.xml, sitemap.xml
     candidates = ["/sitemap_index.xml", "/wp-sitemap.xml", "/sitemap.xml"]
     base = origin.rstrip("/")
     sitemap_url = None
@@ -271,41 +283,39 @@ def collect_all_sitemaps(origin: str, limit=4000):
                 break
         except Exception:
             continue
-    if not sitemap_url:
-        logging.warning("[sitemap skip] どのsitemapも取得できませんでした")
-        return []
-
-    def _crawl(sm_url, seen):
-        if sm_url in seen:
-            return []
-        seen.add(sm_url)
-        try:
-            r = requests.get(sm_url, timeout=30)
-            if r.status_code != 200 or not r.text.lstrip().startswith("<"):
-                logging.warning("[sitemap skip] %s %s", sm_url, r.status_code)
-                return []
-            root = ET.fromstring(r.text)
-            tag = root.tag.lower()
-            if tag.endswith("sitemapindex"):
-                out = []
-                for loc in root.iter("{*}loc"):
-                    out += _crawl(loc.text.strip(), seen)
-                return out
-            else:
-                urls = set()
-                for loc in root.iter("{*}loc"):
-                    u = loc.text.strip()
-                    ul = u.lower()
-                    if ul.endswith(".xml") or ".xml?" in ul:
-                        continue
-                    urls.add(u)
-                return list(urls)
-        except Exception as e:
-            logging.warning("[sitemap skip] %s %s", sm_url, e)
-            return []
-    urls = list(set(_crawl(sitemap_url, set())))
+    if sitemap_url:
+        urls.update(_crawl_sitemap(sitemap_url, seen))
+    urls = list(urls)
     random.shuffle(urls)
+    urls = [u for u in urls if not u.lower().endswith(".xml") and ".xml?" not in u.lower()]
+    urls = list(dict.fromkeys(urls))  # 重複除去
     return urls[:limit]
+
+def _crawl_sitemap(sm_url: str, seen: set) -> list:
+    if sm_url in seen:
+        return []
+    seen.add(sm_url)
+    out = []
+    try:
+        r = requests.get(sm_url, timeout=30)
+        if r.status_code != 200 or not r.text.lstrip().startswith("<"):
+            logging.warning("[sitemap skip] %s %s", sm_url, r.status_code)
+            return []
+        root = ET.fromstring(r.text)
+        tag = root.tag.lower()
+        if tag.endswith("sitemapindex"):
+            for loc in root.iter("{*}loc"):
+                out += _crawl_sitemap(loc.text.strip(), seen)
+        else:
+            for loc in root.iter("{*}loc"):
+                u = loc.text.strip()
+                ul = u.lower()
+                if ul.endswith(".xml") or ".xml?" in ul:
+                    continue
+                out.append(u)
+    except Exception as e:
+        logging.warning("[sitemap skip] %s %s", sm_url, e)
+    return out
 
 session = requests.Session()
 session.mount("https://", HTTPAdapter(max_retries=Retry(
@@ -323,8 +333,8 @@ def main():
     urls = collect_all_sitemaps(ORIGIN_URL)
     if not urls:
         logging.warning("[sitemap skip] 取得 URL が 0 件。サイトマップ設定を確認してください。")
-        plt.figure().savefig("blank.png")
-        post_slack("⚠️ CWV レポート失敗: サイトマップが取得できませんでした。", pathlib.Path("blank.png"))
+        plt.figure().savefig("empty.png")
+        post_slack("⚠️ CWV レポート失敗: サイトマップが取得できませんでした。", pathlib.Path("empty.png"))
         sys.exit(0)
 
     poor_urls_mobile, poor_urls_desktop = [], []
