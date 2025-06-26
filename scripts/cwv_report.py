@@ -180,19 +180,17 @@ def post_slack(text: str, file_path: pathlib.Path):
     if SLACK_TOKEN:
         client = WebClient(token=SLACK_TOKEN)
         try:
-            # TODO: files_upload は 2025-11-12 廃止予定
-            # 新API: files_getUploadURLExternal / files_completeUploadExternal への移行を検討
-            client.files_upload(
+            # files_upload は 2025-11-12 廃止予定
+            client.files_upload_v2(
                 channels=SLACK_CH,
+                initial_comment=text,
                 file=str(file_path),
-                title="CWV Report",
-                initial_comment=text
+                title="CWV Report"
             )
         except SlackApiError as e:
             print(f"Slack API error: {e.response['error']}", file=sys.stderr)
             raise
     elif SLACK_WEBHOOK:
-        # Webhook には画像をアップできないので QuickChart などに切り替え必要
         payload = {"text": text + "\n(画像アップロードには Bot Token が必要です)"}
         requests.post(SLACK_WEBHOOK, json=payload, timeout=10)
     else:
@@ -235,6 +233,9 @@ session.mount("https://", HTTPAdapter(max_retries=Retry(
 
 # --- robust sitemap collector ---
 def collect_all_sitemaps(origin: str, limit=4000):
+    session = requests.Session()
+    session.mount("https://", HTTPAdapter(max_retries=Retry(
+        total=3, backoff_factor=0.3, status_forcelist=[500, 502, 503, 504])))
     def recurse(sitemap_url: str, seen: set) -> list:
         if sitemap_url in seen:
             return []
@@ -267,9 +268,14 @@ def collect_all_sitemaps(origin: str, limit=4000):
                 logging.warning("empty sitemap %s", sitemap_url)
                 return []
         return out
-    idx = urllib.parse.urljoin(origin, "/sitemap_index.xml")
-    urls = recurse(idx, set()) or recurse(urllib.parse.urljoin(origin, "/sitemap.xml"), set())
-    return urls[:limit]
+    # WP 5.5+ デフォルトは /wp-sitemap.xml
+    cand_index = ["/sitemap_index.xml", "/wp-sitemap.xml", "/sitemap.xml"]
+    for p in cand_index:
+        idx = urllib.parse.urljoin(origin, p)
+        urls = recurse(idx, set())
+        if urls:
+            return urls[:limit]
+    return []
 
 def main():
     today = datetime.date.today().isoformat()
