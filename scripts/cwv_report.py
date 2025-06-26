@@ -227,24 +227,35 @@ def is_url_poor(url, form_factor):
         return False
 
 def collect_all_pages(origin: str, limit=4000):
+    import logging
+    logger = logging.getLogger("cwv_sitemap")
     def walk(sm_url, seen):
         urls=[]
         if sm_url in seen: return urls
         seen.add(sm_url)
         try:
-            xml = requests.get(sm_url,timeout=30).text
-            root = ET.fromstring(xml)
+            r = requests.get(sm_url,timeout=30)
+            if r.status_code != 200 or "xml" not in r.headers.get("Content-Type",""):
+                raise ValueError(f"Non-XML response {r.status_code}")
+            try:
+                root = ET.fromstring(r.text)
+            except ET.ParseError as e:
+                raise ValueError(f"ParseError {e}") from e
             if root.tag.endswith("sitemapindex"):
                 for loc in root.iter("{*}loc"):
                     urls += walk(loc.text.strip(), seen)
             else:  # urlset
                 for loc in root.iter("{*}loc"):
                     u = loc.text.strip()
-                    # .xmlで終わるものは除外
-                    if not u.lower().endswith(".xml"):
-                        urls.append(u)
-        except Exception as e:
+                    if u.lower().endswith(".xml") or ".xml?" in u.lower():
+                        continue
+                    urls.append(u)
+                if not urls:
+                    logger.warning(f"empty sitemap {sm_url}")
+                    return []
+        except (ET.ParseError, ValueError) as e:
             print(f"sitemap parse error: {sm_url} {e}", file=sys.stderr)
+            return []
         return urls
     top = urllib.parse.urljoin(origin, "sitemap_index.xml")
     try:
