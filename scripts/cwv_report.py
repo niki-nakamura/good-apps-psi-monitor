@@ -140,12 +140,18 @@ def aggregate_probabilistic_strict(metrics: dict) -> Tuple[float, float, float]:
         # strict poor: 厳しめ閾値を超えるbinの合計
         strict_poor = 0
         for b in bins:
-            if key=="largest_contentful_paint" and b.get("start",0)>=3.0*1000:
-                strict_poor += b["density"]
-            elif key=="interaction_to_next_paint" and b.get("start",0)>=0.3*1000:
-                strict_poor += b["density"]
-            elif key=="cumulative_layout_shift" and b.get("start",0)>=0.15:
-                strict_poor += b["density"]
+            try:
+                s = float(b.get("start", 0) or 0)
+                e = float(b.get("end", 1e9) or 1e9)
+                if key == "largest_contentful_paint" and s >= 3.0 * 1000:
+                    strict_poor += b["density"]
+                elif key == "interaction_to_next_paint" and s >= 0.3 * 1000:
+                    strict_poor += b["density"]
+                elif key == "cumulative_layout_shift" and s >= 0.15:
+                    strict_poor += b["density"]
+            except ValueError:
+                logging.warning("histogram start/end not numeric: %s", b)
+                continue
         strict_poors.append(strict_poor)
     good = 1
     for g in goods:
