@@ -248,11 +248,16 @@ def post_slack(text: str, file_path: pathlib.Path = None):
         client.files_upload_v2(
             channel_id=SLACK_CH,
             initial_comment=text,
-            file=str(file_path),
-            title="CWV Report"
+            file_uploads=[{
+                "file": str(file_path),
+                "filename": file_path.name,
+                "title": file_path.stem,
+            }],
         )
     except SlackApiError as e:
         logging.error(f"Slack API error: {e.response['error']}")
+        if e.response['error'] == 'channel_not_found':
+            sys.exit(0)
         return
 
 # --- robust sitemap collector ---
@@ -289,6 +294,11 @@ def collect_all_sitemaps(origin: str, limit=4000):
     random.shuffle(urls)
     urls = [u for u in urls if not u.lower().endswith(".xml") and ".xml?" not in u.lower()]
     urls = list(dict.fromkeys(urls))  # 重複除去
+    if not urls:
+        logging.warning("[sitemap skip] 取得 URL が 0 件。サイトマップ設定を確認してください。")
+        plt.figure().savefig("empty.png")
+        post_slack("⚠️ CWV レポート失敗: URLを取得できませんでした。", None)
+        sys.exit(0)
     return urls[:limit]
 
 def _crawl_sitemap(sm_url: str, seen: set) -> list:
