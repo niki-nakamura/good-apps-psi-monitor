@@ -226,6 +226,33 @@ def is_url_poor(url, form_factor):
         print(f"crux page error: {url} {e}", file=sys.stderr)
         return False
 
+def collect_all_pages(origin: str, limit=4000):
+    def walk(sm_url, seen):
+        urls=[]
+        if sm_url in seen: return urls
+        seen.add(sm_url)
+        try:
+            xml = requests.get(sm_url,timeout=30).text
+            root = ET.fromstring(xml)
+            if root.tag.endswith("sitemapindex"):
+                for loc in root.iter("{*}loc"):
+                    urls += walk(loc.text.strip(), seen)
+            else:  # urlset
+                for loc in root.iter("{*}loc"):
+                    u = loc.text.strip()
+                    # .xmlで終わるものは除外
+                    if not u.lower().endswith(".xml"):
+                        urls.append(u)
+        except Exception as e:
+            print(f"sitemap parse error: {sm_url} {e}", file=sys.stderr)
+        return urls
+    top = urllib.parse.urljoin(origin, "sitemap_index.xml")
+    try:
+        pages = walk(top, set())
+    except Exception:
+        pages = walk(urllib.parse.urljoin(origin, "sitemap.xml"), set())
+    return pages[:limit]
+
 def main():
     today = datetime.date.today().isoformat()
     # 1. CrUX API からモバイル/デスクトップのヒストグラムを取得
@@ -238,12 +265,13 @@ def main():
     mob_vals = to_counts(mob_pct)
     pc_vals  = to_counts(pc_pct)
 
-    # 3. モバイル不良URLリスト抽出（最大20件）
-    urls = get_urls_from_sitemap(ORIGIN_URL)
+    # 3. モバイル不良URLリスト抽出（最大20件、nodataは改善扱い）
+    urls = collect_all_pages(ORIGIN_URL)
     poor_urls = []
     for u in urls:
         try:
-            if is_url_poor(u, "PHONE"):
+            status = "poor" if is_url_poor(u, "PHONE") else "good"
+            if status == "poor":
                 poor_urls.append(u)
                 if len(poor_urls) >= 20:
                     break
