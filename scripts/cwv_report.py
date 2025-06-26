@@ -127,13 +127,13 @@ def aggregate_probabilistic_strict(metrics: dict) -> Tuple[float, float, float]:
       * 良好% = Π(good_i)
       * 不良% = 1 - Π(1 - strict_poor_i)
       * 改善% = 100 - 良好% - 不良%
-    を求める（閾値を厳しく:LCP>3.0, INP>0.3, CLS>0.15）
+    を求める（閾値をさらに厳しく:LCP>2.5, INP>0.2, CLS>0.1）
     """
     goods = []
     strict_poors = []
     for key, strict_th in zip(
         ("largest_contentful_paint", "interaction_to_next_paint", "cumulative_layout_shift"),
-        (3.0, 0.3, 0.15)):
+        (2.5, 0.2, 0.1)):
         metric = metrics.get(key, {})
         bins = metric.get("histogram", [])
         # good: 公式good bin
@@ -145,11 +145,11 @@ def aggregate_probabilistic_strict(metrics: dict) -> Tuple[float, float, float]:
             try:
                 s = float(b.get("start", 0) or 0)
                 e = float(b.get("end", 1e9) or 1e9)
-                if key == "largest_contentful_paint" and s >= 3.0 * 1000:
+                if key == "largest_contentful_paint" and s >= 2.5 * 1000:
                     strict_poor += b["density"]
-                elif key == "interaction_to_next_paint" and s >= 0.3 * 1000:
+                elif key == "interaction_to_next_paint" and s >= 0.2 * 1000:
                     strict_poor += b["density"]
-                elif key == "cumulative_layout_shift" and s >= 0.15:
+                elif key == "cumulative_layout_shift" and s >= 0.1:
                     strict_poor += b["density"]
             except ValueError:
                 logging.warning("histogram start/end not numeric: %s", b)
@@ -163,7 +163,7 @@ def aggregate_probabilistic_strict(metrics: dict) -> Tuple[float, float, float]:
         not_poor *= (1 - p)
     poor = 1 - not_poor
     ni = max(0.0, 1.0 - good - poor)
-    logging.debug(f"Strict aggregation results - Good: {good*100:.2f}%, NI: {ni*100:.2f}%, Poor: {poor*100:.2f}%")
+    logging.debug(f"Updated strict aggregation results - Good: {good*100:.2f}%, NI: {ni*100:.2f}%, Poor: {poor*100:.2f}%")
     return round(good*100,2), round(ni*100,2), round(poor*100,2)
 
 def to_counts(percentages):
