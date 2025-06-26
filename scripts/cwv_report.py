@@ -176,30 +176,22 @@ def plot_chart(df: pd.DataFrame):
     plt.savefig(CHART_FILE)
     plt.close()
 
-def post_slack(text: str, file_path: pathlib.Path):
-    if SLACK_TOKEN:
-        client = WebClient(token=SLACK_TOKEN)
-        try:
-            # files_upload_v2: channel_idはリストでIDを渡す
-            client.files_upload_v2(
-                channel_id=[SLACK_CH],
-                initial_comment=text,
-                file=str(file_path),
-                title="CWV Report"
-            )
-        except SlackApiError as e:
-            print(f"Slack API error: {e.response['error']}", file=sys.stderr)
-            # Webhook fallback
-            if SLACK_WEBHOOK:
-                payload = {"text": text + "\n(画像アップロードには Bot Token が必要です)"}
-                requests.post(SLACK_WEBHOOK, json=payload, timeout=10)
-            else:
-                raise
-    elif SLACK_WEBHOOK:
-        payload = {"text": text + "\n(画像アップロードには Bot Token が必要です)"}
-        requests.post(SLACK_WEBHOOK, json=payload, timeout=10)
-    else:
-        print("No Slack credentials provided", file=sys.stderr)
+def post_slack(text: str, file_path: pathlib.Path = None):
+    if not SLACK_TOKEN:
+        logging.error("Slack token missing")
+        return
+    client = WebClient(token=SLACK_TOKEN)
+    # ファイルが存在しない/0バイトならメッセージのみ送信
+    if not file_path or not file_path.exists() or file_path.stat().st_size == 0:
+        client.chat_postMessage(channel=SLACK_CH, text=text)
+        return
+    # v2 APIでアップロード
+    client.files_upload_v2(
+        channel_id=SLACK_CH,  # 文字列で渡す
+        initial_comment=text,
+        file=str(file_path),
+        title="CWV Report"
+    )
 
 def fetch_robot_sitemaps(origin):
     try:
@@ -213,58 +205,45 @@ def fetch_robot_sitemaps(origin):
 
 # --- robust sitemap collector ---
 def collect_all_sitemaps(origin: str, limit=4000):
-    session = requests.Session()
-    session.mount("https://", HTTPAdapter(max_retries=Retry(
-        total=3, backoff_factor=0.3, status_forcelist=[500, 502, 503, 504])))
-    def recurse(sitemap_url: str, seen: set) -> list:
-        if sitemap_url in seen:
+    """robots.txt / sitemap*.xml から最大4000URL取得"""
+    def _crawl_sitemap(sm_url: str, seen: set) -> list:
+        if sm_url in seen:
             return []
-        seen.add(sitemap_url)
-        try:
-            r = session.get(sitemap_url, timeout=(10,30), allow_redirects=True)
-            if r.status_code != 200 or "xml" not in r.headers.get("Content-Type",""):
-                logging.warning("[sitemap skip] %s %s", sitemap_url, r.status_code)
-                return []
-            try:
-                root = ET.fromstring(r.text)
-            except ET.ParseError as e:
-                logging.warning("[sitemap parse error] %s %s", sitemap_url, e)
-                return []
-        except Exception as e:
-            logging.warning("[sitemap error] %s %s", sitemap_url, e)
-            return []
+        seen.add(sm_url)
         out = []
-        if root.tag.endswith("sitemapindex"):
-            for loc in root.iter("{*}loc"):
-                out += recurse(loc.text.strip(), seen)
-        else:
-            for loc in root.iter("{*}loc"):
-                u = loc.text.strip()
-                ul = u.lower()
-                if ul.endswith(".xml") or ".xml?" in ul:
-                    continue
-                out.append(u)
-            if not out:
-                logging.warning("empty sitemap %s", sitemap_url)
+        try:
+            r = requests.get(sm_url, timeout=30)
+            if r.status_code != 200 or not r.text.lstrip().startswith("<"):
+                logging.warning("[sitemap skip] %s %s", sm_url, r.status_code)
                 return []
+            root = ET.fromstring(r.text)
+            tag = root.tag.lower()
+            if tag.endswith("sitemapindex"):
+                for loc in root.iter("{*}loc"):
+                    out += _crawl_sitemap(loc.text.strip(), seen)
+            else:
+                for loc in root.iter("{*}loc"):
+                    u = loc.text.strip()
+                    ul = u.lower()
+                    if ul.endswith(".xml") or ".xml?" in ul:
+                        continue
+                    out.append(u)
+        except Exception as e:
+            logging.warning("[sitemap skip] %s %s", sm_url, e)
         return out
-    # robots.txt からも探索
-    robots_sitemaps = fetch_robot_sitemaps(origin)
-    cand_index = ["/sitemap_index.xml", "/wp-sitemap.xml", "/sitemap.xml"]
-    tried = set()
-    urls = []
-    for p in cand_index:
-        idx = urllib.parse.urljoin(origin, p)
-        if idx in tried:
-            continue
-        tried.add(idx)
-        urls = recurse(idx, set())
-        if urls:
-            break
-    # robots.txt のSitemapも追加
-    for sm in robots_sitemaps:
-        if sm not in tried:
-            urls += recurse(sm, set())
+
+    seen, urls = set(), []
+    # robots.txt から Sitemap 行を抽出
+    try:
+        robots = requests.get(urllib.parse.urljoin(origin, "/robots.txt"), timeout=10).text
+        for line in robots.splitlines():
+            if line.lower().startswith("sitemap:"):
+                urls += _crawl_sitemap(line.split(":", 1)[1].strip(), seen)
+    except Exception as e:
+        logging.warning("[robots skip] %s", e)
+    # fallback: /sitemap.xml
+    if not urls:
+        urls += _crawl_sitemap(urllib.parse.urljoin(origin, "/sitemap.xml"), seen)
     return urls[:limit]
 
 def is_url_poor(url, form_factor):
@@ -307,8 +286,8 @@ def main():
     urls = collect_all_sitemaps(ORIGIN_URL)
     if not urls:
         logging.warning("[sitemap skip] 取得 URL が 0 件。サイトマップ設定を確認してください。")
-        post_slack("[CWV] サイトマップからURLを取得できませんでした。", CHART_FILE)
-        return
+        post_slack("⚠️ CWV レポート失敗: サイトマップが取得できませんでした。", None)
+        sys.exit(0)
     poor_urls = []
     for u in urls:
         try:
