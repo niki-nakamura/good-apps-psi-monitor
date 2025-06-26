@@ -283,7 +283,7 @@ def collect_all_sitemaps(origin: str, limit=4000):
         url = base + path
         try:
             r = requests.head(url, timeout=10, allow_redirects=True)
-            if r.status_code == 200:
+            if r.status_code == 200 and "xml" in r.headers.get("content-type", "").lower():
                 sitemap_url = url
                 break
         except Exception:
@@ -296,9 +296,11 @@ def collect_all_sitemaps(origin: str, limit=4000):
     urls = list(dict.fromkeys(urls))  # 重複除去
     if not urls:
         logging.warning("[sitemap skip] 取得 URL が 0 件。サイトマップ設定を確認してください。")
-        plt.figure().savefig("empty.png")
-        post_slack("⚠️ CWV レポート失敗: URLを取得できませんでした。", None)
-        sys.exit(0)
+        plt.figure(figsize=(2,1)); plt.axis("off")
+        empty = pathlib.Path("empty.png")
+        plt.savefig(empty); plt.close()
+        post_slack("⚠️ CWV レポート失敗: サイトマップが取得できませんでした。", empty)
+        return []
     return urls[:limit]
 
 def _crawl_sitemap(sm_url: str, seen: set) -> list:
