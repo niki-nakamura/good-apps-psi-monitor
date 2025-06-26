@@ -180,56 +180,36 @@ def post_slack(text: str, file_path: pathlib.Path):
     if SLACK_TOKEN:
         client = WebClient(token=SLACK_TOKEN)
         try:
-            # files_upload は 2025-11-12 廃止予定
+            # files_upload_v2: channel_idはリストでIDを渡す
             client.files_upload_v2(
-                channels=SLACK_CH,
+                channel_id=[SLACK_CH],
                 initial_comment=text,
                 file=str(file_path),
                 title="CWV Report"
             )
         except SlackApiError as e:
             print(f"Slack API error: {e.response['error']}", file=sys.stderr)
-            raise
+            # Webhook fallback
+            if SLACK_WEBHOOK:
+                payload = {"text": text + "\n(画像アップロードには Bot Token が必要です)"}
+                requests.post(SLACK_WEBHOOK, json=payload, timeout=10)
+            else:
+                raise
     elif SLACK_WEBHOOK:
         payload = {"text": text + "\n(画像アップロードには Bot Token が必要です)"}
         requests.post(SLACK_WEBHOOK, json=payload, timeout=10)
     else:
         print("No Slack credentials provided", file=sys.stderr)
 
-def get_urls_from_sitemap(origin_url):
-    """サイトマップからURL一覧を取得（最大2000件）"""
-    sitemap_url = urllib.parse.urljoin(origin_url, "/sitemap.xml")
+def fetch_robot_sitemaps(origin):
     try:
-        xml = requests.get(sitemap_url, timeout=30).text
-        root = ET.fromstring(xml)
-        return [n.text for n in root.iter() if n.tag.endswith("loc")][:2000]
-    except Exception as e:
-        print(f"sitemap error: {e}", file=sys.stderr)
-        return []
-
-def is_url_poor(url, form_factor):
-    """CrUXページAPIで指定URLが不良か判定（form_factor=PHONE/DESKTOP）"""
-    api = "https://chromeuxreport.googleapis.com/v1/records:queryRecord"
-    payload = {"url": url, "formFactor": form_factor}
-    try:
-        r = requests.post(f"{api}?key={CRUX_API_KEY}", json=payload, timeout=20)
+        r = requests.get(urllib.parse.urljoin(origin, "/robots.txt"), timeout=10)
         r.raise_for_status()
-        metrics = r.json().get("record", {}).get("metrics", {})
-        for m in ("largest_contentful_paint", "interaction_to_next_paint", "cumulative_layout_shift"):
-            v = metrics.get(m, {})
-            if v.get("histogram"):
-                bins = v["histogram"]
-                poor = bins[2]["density"] if len(bins) > 2 else 0
-                if poor > 0.0:
-                    return True
-        return False
-    except Exception as e:
-        print(f"crux page error: {url} {e}", file=sys.stderr)
-        return False
-
-session = requests.Session()
-session.mount("https://", HTTPAdapter(max_retries=Retry(
-    total=3, backoff_factor=0.3, status_forcelist=[500, 502, 503, 504])))
+        return [line.split(":",1)[1].strip()
+                for line in r.text.splitlines()
+                if line.lower().startswith("sitemap:")]
+    except Exception:
+        return []
 
 # --- robust sitemap collector ---
 def collect_all_sitemaps(origin: str, limit=4000):
@@ -268,14 +248,48 @@ def collect_all_sitemaps(origin: str, limit=4000):
                 logging.warning("empty sitemap %s", sitemap_url)
                 return []
         return out
-    # WP 5.5+ デフォルトは /wp-sitemap.xml
+    # robots.txt からも探索
+    robots_sitemaps = fetch_robot_sitemaps(origin)
     cand_index = ["/sitemap_index.xml", "/wp-sitemap.xml", "/sitemap.xml"]
+    tried = set()
+    urls = []
     for p in cand_index:
         idx = urllib.parse.urljoin(origin, p)
+        if idx in tried:
+            continue
+        tried.add(idx)
         urls = recurse(idx, set())
         if urls:
-            return urls[:limit]
-    return []
+            break
+    # robots.txt のSitemapも追加
+    for sm in robots_sitemaps:
+        if sm not in tried:
+            urls += recurse(sm, set())
+    return urls[:limit]
+
+def is_url_poor(url, form_factor):
+    """CrUXページAPIで指定URLが不良か判定（form_factor=PHONE/DESKTOP）"""
+    api = "https://chromeuxreport.googleapis.com/v1/records:queryRecord"
+    payload = {"url": url, "formFactor": form_factor}
+    try:
+        r = requests.post(f"{api}?key={CRUX_API_KEY}", json=payload, timeout=20)
+        r.raise_for_status()
+        metrics = r.json().get("record", {}).get("metrics", {})
+        for m in ("largest_contentful_paint", "interaction_to_next_paint", "cumulative_layout_shift"):
+            v = metrics.get(m, {})
+            if v.get("histogram"):
+                bins = v["histogram"]
+                poor = bins[2]["density"] if len(bins) > 2 else 0
+                if poor > 0.0:
+                    return True
+        return False
+    except Exception as e:
+        print(f"crux page error: {url} {e}", file=sys.stderr)
+        return False
+
+session = requests.Session()
+session.mount("https://", HTTPAdapter(max_retries=Retry(
+    total=3, backoff_factor=0.3, status_forcelist=[500, 502, 503, 504])))
 
 def main():
     today = datetime.date.today().isoformat()
@@ -291,6 +305,10 @@ def main():
 
     # 3. 不良URLリスト抽出（mobile/desktopいずれかpoor, 最大50件）
     urls = collect_all_sitemaps(ORIGIN_URL)
+    if not urls:
+        logging.warning("[sitemap skip] 取得 URL が 0 件。サイトマップ設定を確認してください。")
+        post_slack("[CWV] サイトマップからURLを取得できませんでした。", CHART_FILE)
+        return
     poor_urls = []
     for u in urls:
         try:
