@@ -163,6 +163,7 @@ def aggregate_probabilistic_strict(metrics: dict) -> Tuple[float, float, float]:
         not_poor *= (1 - p)
     poor = 1 - not_poor
     ni = max(0.0, 1.0 - good - poor)
+    logging.debug(f"Strict aggregation results - Good: {good*100:.2f}%, NI: {ni*100:.2f}%, Poor: {poor*100:.2f}%")
     return round(good*100,2), round(ni*100,2), round(poor*100,2)
 
 def to_counts(percentages):
@@ -308,6 +309,9 @@ def main():
     logging.info("Using strict thresholds for aggregation.")
     mob_pct = aggregate_probabilistic_strict(mob_metrics)
     pc_pct  = aggregate_probabilistic_strict(pc_metrics)
+
+    logging.debug(f"Mobile strict percentages: {mob_pct}")
+    logging.debug(f"Desktop strict percentages: {pc_pct}")
 
     mob_vals = to_counts(mob_pct)
     pc_vals  = to_counts(pc_pct)
