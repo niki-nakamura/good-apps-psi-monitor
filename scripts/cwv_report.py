@@ -176,41 +176,109 @@ def plot_chart(df: pd.DataFrame):
     plt.savefig(CHART_FILE)
     plt.close()
 
+def psi_field_status(url, key, strategy):
+    """PSI API で指定 strategy の FieldData を取得し GSC 方式で判定。FieldData 無ければ 'nodata'"""
+    psi = "https://www.googleapis.com/pagespeedonline/v5/runPagespeed"
+    params = {
+        "url": url,
+        "key": key,
+        "category": "performance",
+        "strategy": strategy,
+        "originFallback": "true"
+    }
+    try:
+        data = requests.get(psi, params=params, timeout=30).json()
+        if "loadingExperience" not in data or "metrics" not in data["loadingExperience"]:
+            return "nodata"
+        fd = data["loadingExperience"]["metrics"]
+        lcp = fd["LARGEST_CONTENTFUL_PAINT_MS"]["percentile"] / 1000 if "LARGEST_CONTENTFUL_PAINT_MS" in fd else None
+        cls = fd["CUMULATIVE_LAYOUT_SHIFT_SCORE"]["percentile"] / 100 if "CUMULATIVE_LAYOUT_SHIFT_SCORE" in fd else None
+        inp = fd["INP"]["percentile"] / 1000 if "INP" in fd else None
+        if lcp is None or cls is None or inp is None:
+            return "nodata"
+        status = "good"
+        if lcp > 4 or inp > 0.5 or cls > 0.25:
+            status = "poor"
+        elif lcp > 2.5 or inp > 0.2 or cls > 0.1:
+            status = "ni"
+        return status
+    except Exception as e:
+        logging.warning(f"PSI error for {url} ({strategy}): {e}")
+        return "nodata"
+
+def crux_page_status(url, key, strategy):
+    api = "https://chromeuxreport.googleapis.com/v1/records:queryRecord"
+    payload = {
+        "url": url,
+        "formFactor": "PHONE" if strategy == "mobile" else "DESKTOP"
+    }
+    try:
+        r = requests.post(f"{api}?key={key}", json=payload, timeout=30)
+        r.raise_for_status()
+        metrics = r.json().get("record", {}).get("metrics", {})
+        def get_p75(metric):
+            return metric.get("percentiles", {}).get("p75")
+        lcp = get_p75(metrics.get("largest_contentful_paint", {}))
+        inp = get_p75(metrics.get("interaction_to_next_paint", {}))
+        cls = get_p75(metrics.get("cumulative_layout_shift", {}))
+        if lcp is None or inp is None or cls is None:
+            return "nodata"
+        lcp = lcp / 1000
+        inp = inp / 1000
+        cls = cls / 100
+        status = "good"
+        if lcp > 4 or inp > 0.5 or cls > 0.25:
+            status = "poor"
+        elif lcp > 2.5 or inp > 0.2 or cls > 0.1:
+            status = "ni"
+        return status
+    except Exception as e:
+        logging.warning(f"CrUX page error for {url} ({strategy}): {e}")
+        return "nodata"
+
 def post_slack(text: str, file_path: pathlib.Path = None):
     if not SLACK_TOKEN:
         logging.error("Slack token missing")
         return
     client = WebClient(token=SLACK_TOKEN)
-    # ファイルが存在しない/0バイトならメッセージのみ送信
-    if not file_path or not file_path.exists() or file_path.stat().st_size == 0:
-        client.chat_postMessage(channel=SLACK_CH, text=text)
-        return
-    # v2 APIでアップロード
-    client.files_upload_v2(
-        channel_id=SLACK_CH,  # 文字列で渡す
-        initial_comment=text,
-        file=str(file_path),
-        title="CWV Report"
-    )
-
-def fetch_robot_sitemaps(origin):
     try:
-        r = requests.get(urllib.parse.urljoin(origin, "/robots.txt"), timeout=10)
-        r.raise_for_status()
-        return [line.split(":",1)[1].strip()
-                for line in r.text.splitlines()
-                if line.lower().startswith("sitemap:")]
-    except Exception:
-        return []
+        if not file_path or not file_path.exists() or file_path.stat().st_size == 0:
+            client.chat_postMessage(channel=SLACK_CH, text=text)
+            return
+        client.files_upload_v2(
+            channel_id=SLACK_CH,
+            initial_comment=text,
+            file=str(file_path),
+            title="CWV Report"
+        )
+    except SlackApiError as e:
+        logging.error(f"Slack API error: {e.response['error']}")
+        return
 
 # --- robust sitemap collector ---
 def collect_all_sitemaps(origin: str, limit=4000):
-    """robots.txt / sitemap*.xml から最大4000URL取得"""
-    def _crawl_sitemap(sm_url: str, seen: set) -> list:
+    """sitemap_index.xml → wp-sitemap.xml → sitemap.xml の順で最大4000件のURLを取得"""
+    import random
+    candidates = ["/sitemap_index.xml", "/wp-sitemap.xml", "/sitemap.xml"]
+    base = origin.rstrip("/")
+    sitemap_url = None
+    for path in candidates:
+        url = base + path
+        try:
+            r = requests.head(url, timeout=10, allow_redirects=True)
+            if r.status_code == 200:
+                sitemap_url = url
+                break
+        except Exception:
+            continue
+    if not sitemap_url:
+        logging.warning("[sitemap skip] どのsitemapも取得できませんでした")
+        return []
+
+    def _crawl(sm_url, seen):
         if sm_url in seen:
             return []
         seen.add(sm_url)
-        out = []
         try:
             r = requests.get(sm_url, timeout=30)
             if r.status_code != 200 or not r.text.lstrip().startswith("<"):
@@ -219,52 +287,25 @@ def collect_all_sitemaps(origin: str, limit=4000):
             root = ET.fromstring(r.text)
             tag = root.tag.lower()
             if tag.endswith("sitemapindex"):
+                out = []
                 for loc in root.iter("{*}loc"):
-                    out += _crawl_sitemap(loc.text.strip(), seen)
+                    out += _crawl(loc.text.strip(), seen)
+                return out
             else:
+                urls = set()
                 for loc in root.iter("{*}loc"):
                     u = loc.text.strip()
                     ul = u.lower()
                     if ul.endswith(".xml") or ".xml?" in ul:
                         continue
-                    out.append(u)
+                    urls.add(u)
+                return list(urls)
         except Exception as e:
             logging.warning("[sitemap skip] %s %s", sm_url, e)
-        return out
-
-    seen, urls = set(), []
-    # robots.txt から Sitemap 行を抽出
-    try:
-        robots = requests.get(urllib.parse.urljoin(origin, "/robots.txt"), timeout=10).text
-        for line in robots.splitlines():
-            if line.lower().startswith("sitemap:"):
-                urls += _crawl_sitemap(line.split(":", 1)[1].strip(), seen)
-    except Exception as e:
-        logging.warning("[robots skip] %s", e)
-    # fallback: /sitemap.xml
-    if not urls:
-        urls += _crawl_sitemap(urllib.parse.urljoin(origin, "/sitemap.xml"), seen)
+            return []
+    urls = list(set(_crawl(sitemap_url, set())))
+    random.shuffle(urls)
     return urls[:limit]
-
-def is_url_poor(url, form_factor):
-    """CrUXページAPIで指定URLが不良か判定（form_factor=PHONE/DESKTOP）"""
-    api = "https://chromeuxreport.googleapis.com/v1/records:queryRecord"
-    payload = {"url": url, "formFactor": form_factor}
-    try:
-        r = requests.post(f"{api}?key={CRUX_API_KEY}", json=payload, timeout=20)
-        r.raise_for_status()
-        metrics = r.json().get("record", {}).get("metrics", {})
-        for m in ("largest_contentful_paint", "interaction_to_next_paint", "cumulative_layout_shift"):
-            v = metrics.get(m, {})
-            if v.get("histogram"):
-                bins = v["histogram"]
-                poor = bins[2]["density"] if len(bins) > 2 else 0
-                if poor > 0.0:
-                    return True
-        return False
-    except Exception as e:
-        print(f"crux page error: {url} {e}", file=sys.stderr)
-        return False
 
 session = requests.Session()
 session.mount("https://", HTTPAdapter(max_retries=Retry(
@@ -272,41 +313,37 @@ session.mount("https://", HTTPAdapter(max_retries=Retry(
 
 def main():
     today = datetime.date.today().isoformat()
-    # 1. CrUX API からモバイル/デスクトップのヒストグラムを取得
     mob_metrics = fetch_crux("PHONE")
     pc_metrics  = fetch_crux("DESKTOP")
     mob_pct = aggregate(mob_metrics)
     pc_pct  = aggregate(pc_metrics)
-
-    # 2. 件数換算（URL_TOTAL_COUNTが0なら割合のみ）
     mob_vals = to_counts(mob_pct)
     pc_vals  = to_counts(pc_pct)
 
-    # 3. 不良URLリスト抽出（mobile/desktopいずれかpoor, 最大50件）
     urls = collect_all_sitemaps(ORIGIN_URL)
     if not urls:
         logging.warning("[sitemap skip] 取得 URL が 0 件。サイトマップ設定を確認してください。")
-        post_slack("⚠️ CWV レポート失敗: サイトマップが取得できませんでした。", None)
+        plt.figure().savefig("blank.png")
+        post_slack("⚠️ CWV レポート失敗: サイトマップが取得できませんでした。", pathlib.Path("blank.png"))
         sys.exit(0)
-    poor_urls = []
-    for u in urls:
-        try:
-            mob_poor = is_url_poor(u, "PHONE")
-            pc_poor  = is_url_poor(u, "DESKTOP")
-            if mob_poor or pc_poor:
-                logging.info("Poor URL detected: %s", u)
-                poor_urls.append(u)
-                if len(poor_urls) >= 50:
-                    break
-        except Exception as e:
-            logging.warning("[poor check error] %s %s", u, e)
-            continue
 
-    # 4. 履歴更新 & グラフ生成
+    poor_urls_mobile, poor_urls_desktop = [], []
+    for u in urls:
+        mob_stat = psi_field_status(u, CRUX_API_KEY, "mobile")
+        if mob_stat == "nodata":
+            mob_stat = crux_page_status(u, CRUX_API_KEY, "mobile")
+        pc_stat = psi_field_status(u, CRUX_API_KEY, "desktop")
+        if pc_stat == "nodata":
+            pc_stat = crux_page_status(u, CRUX_API_KEY, "desktop")
+        if mob_stat == "poor":
+            poor_urls_mobile.append(u)
+        if pc_stat == "poor":
+            poor_urls_desktop.append(u)
+        time.sleep(0.6)
+
     df = update_history(today, mob_vals, pc_vals)
     plot_chart(df)
 
-    # 5. Slack へ投稿
     def fmt(vals):
         if TOTAL_COUNT:
             return f"良好 {vals[0]} 件 / 改善 {vals[1]} 件 / 不良 {vals[2]} 件"
@@ -316,10 +353,14 @@ def main():
         f"• モバイル:  {fmt(mob_vals)}\n"
         f"• デスクトップ: {fmt(pc_vals)}"
     )
-    if poor_urls:
-        msg += f"\n\n*不良URL一覧 (最大50件)*:\n" + "\n".join(poor_urls[:50])
-        if len(poor_urls) > 50:
-            msg += f"\n…他 {len(poor_urls)-50} 件"
+    if poor_urls_mobile:
+        msg += f"\n\n⚠️ Poor 判定 URL (Mobile):\n" + "\n".join(poor_urls_mobile[:20])
+        if len(poor_urls_mobile) > 20:
+            msg += f"\n…他 {len(poor_urls_mobile)-20} 件"
+    if poor_urls_desktop:
+        msg += f"\n\n⚠️ Poor 判定 URL (Desktop):\n" + "\n".join(poor_urls_desktop[:20])
+        if len(poor_urls_desktop) > 20:
+            msg += f"\n…他 {len(poor_urls_desktop)-20} 件"
     post_slack(msg, CHART_FILE)
 
 if __name__ == "__main__":
