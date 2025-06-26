@@ -125,46 +125,30 @@ def aggregate_probabilistic_strict(metrics: dict) -> Tuple[float, float, float]:
     """
     3指標のヒストグラムから
       * 良好% = Π(good_i)
-      * 不良% = 1 - Π(1 - strict_poor_i)
+      * 不良% = 1 - Π(1 - poor_i)
       * 改善% = 100 - 良好% - 不良%
-    を求める（閾値をさらに厳しく:LCP>2.5, INP>0.2, CLS>0.1）
+    を求める（通常のCore Web Vitals指標:LCP>4.0, INP>0.5, CLS>0.25）
     """
     goods = []
-    strict_poors = []
-    for key, strict_th in zip(
-        ("largest_contentful_paint", "interaction_to_next_paint", "cumulative_layout_shift"),
-        (2.5, 0.2, 0.1)):
+    poors = []
+    for key in ("largest_contentful_paint", "interaction_to_next_paint", "cumulative_layout_shift"):
         metric = metrics.get(key, {})
         bins = metric.get("histogram", [])
         # good: 公式good bin
         g = bins[0]["density"] if len(bins) > 0 else 0
         goods.append(g)
-        # strict poor: 厳しめ閾値を超えるbinの合計
-        strict_poor = 0
-        for b in bins:
-            try:
-                s = float(b.get("start", 0) or 0)
-                e = float(b.get("end", 1e9) or 1e9)
-                if key == "largest_contentful_paint" and s >= 2.5 * 1000:
-                    strict_poor += b["density"]
-                elif key == "interaction_to_next_paint" and s >= 0.2 * 1000:
-                    strict_poor += b["density"]
-                elif key == "cumulative_layout_shift" and s >= 0.1:
-                    strict_poor += b["density"]
-            except ValueError:
-                logging.warning("histogram start/end not numeric: %s", b)
-                continue
-        strict_poors.append(strict_poor)
+        # poor: 公式poor bin
+        p = bins[2]["density"] if len(bins) > 2 else 0
+        poors.append(p)
     good = 1
     for g in goods:
         good *= g
     not_poor = 1
-    for p in strict_poors:
+    for p in poors:
         not_poor *= (1 - p)
     poor = 1 - not_poor
     ni = max(0.0, 1.0 - good - poor)
-    logging.debug(f"Updated strict aggregation results - Good: {good*100:.2f}%, NI: {ni*100:.2f}%, Poor: {poor*100:.2f}%")
-    return round(good*100,2), round(ni*100,2), round(poor*100,2)
+    return round(good*100, 2), round(ni*100, 2), round(poor*100, 2)
 
 def to_counts(percentages):
     if TOTAL_COUNT == 0:
