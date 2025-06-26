@@ -18,6 +18,9 @@ from slack_sdk.errors import SlackApiError
 import xml.etree.ElementTree as ET
 import urllib.parse
 import time
+import logging
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 ##### 環境変数 #####
 CRUX_API_KEY  = os.getenv("CRUX_API_KEY")
@@ -226,43 +229,47 @@ def is_url_poor(url, form_factor):
         print(f"crux page error: {url} {e}", file=sys.stderr)
         return False
 
-def collect_all_pages(origin: str, limit=4000):
-    import logging
-    logger = logging.getLogger("cwv_sitemap")
-    def walk(sm_url, seen):
-        urls=[]
-        if sm_url in seen: return urls
-        seen.add(sm_url)
+session = requests.Session()
+session.mount("https://", HTTPAdapter(max_retries=Retry(
+    total=3, backoff_factor=0.3, status_forcelist=[500, 502, 503, 504])))
+
+# --- robust sitemap collector ---
+def collect_all_sitemaps(origin: str, limit=4000):
+    def recurse(sitemap_url: str, seen: set) -> list:
+        if sitemap_url in seen:
+            return []
+        seen.add(sitemap_url)
         try:
-            r = requests.get(sm_url,timeout=30)
+            r = session.get(sitemap_url, timeout=(10,30), allow_redirects=True)
             if r.status_code != 200 or "xml" not in r.headers.get("Content-Type",""):
-                raise ValueError(f"Non-XML response {r.status_code}")
+                logging.warning("[sitemap skip] %s %s", sitemap_url, r.status_code)
+                return []
             try:
                 root = ET.fromstring(r.text)
             except ET.ParseError as e:
-                raise ValueError(f"ParseError {e}") from e
-            if root.tag.endswith("sitemapindex"):
-                for loc in root.iter("{*}loc"):
-                    urls += walk(loc.text.strip(), seen)
-            else:  # urlset
-                for loc in root.iter("{*}loc"):
-                    u = loc.text.strip()
-                    if u.lower().endswith(".xml") or ".xml?" in u.lower():
-                        continue
-                    urls.append(u)
-                if not urls:
-                    logger.warning(f"empty sitemap {sm_url}")
-                    return []
-        except (ET.ParseError, ValueError) as e:
-            print(f"sitemap parse error: {sm_url} {e}", file=sys.stderr)
+                logging.warning("[sitemap parse error] %s %s", sitemap_url, e)
+                return []
+        except Exception as e:
+            logging.warning("[sitemap error] %s %s", sitemap_url, e)
             return []
-        return urls
-    top = urllib.parse.urljoin(origin, "sitemap_index.xml")
-    try:
-        pages = walk(top, set())
-    except Exception:
-        pages = walk(urllib.parse.urljoin(origin, "sitemap.xml"), set())
-    return pages[:limit]
+        out = []
+        if root.tag.endswith("sitemapindex"):
+            for loc in root.iter("{*}loc"):
+                out += recurse(loc.text.strip(), seen)
+        else:
+            for loc in root.iter("{*}loc"):
+                u = loc.text.strip()
+                ul = u.lower()
+                if ul.endswith(".xml") or ".xml?" in ul:
+                    continue
+                out.append(u)
+            if not out:
+                logging.warning("empty sitemap %s", sitemap_url)
+                return []
+        return out
+    idx = urllib.parse.urljoin(origin, "/sitemap_index.xml")
+    urls = recurse(idx, set()) or recurse(urllib.parse.urljoin(origin, "/sitemap.xml"), set())
+    return urls[:limit]
 
 def main():
     today = datetime.date.today().isoformat()
@@ -276,17 +283,20 @@ def main():
     mob_vals = to_counts(mob_pct)
     pc_vals  = to_counts(pc_pct)
 
-    # 3. モバイル不良URLリスト抽出（最大20件、nodataは改善扱い）
-    urls = collect_all_pages(ORIGIN_URL)
+    # 3. 不良URLリスト抽出（mobile/desktopいずれかpoor, 最大50件）
+    urls = collect_all_sitemaps(ORIGIN_URL)
     poor_urls = []
     for u in urls:
         try:
-            status = "poor" if is_url_poor(u, "PHONE") else "good"
-            if status == "poor":
+            mob_poor = is_url_poor(u, "PHONE")
+            pc_poor  = is_url_poor(u, "DESKTOP")
+            if mob_poor or pc_poor:
+                logging.info("Poor URL detected: %s", u)
                 poor_urls.append(u)
-                if len(poor_urls) >= 20:
+                if len(poor_urls) >= 50:
                     break
-        except Exception:
+        except Exception as e:
+            logging.warning("[poor check error] %s %s", u, e)
             continue
 
     # 4. 履歴更新 & グラフ生成
@@ -304,7 +314,9 @@ def main():
         f"• デスクトップ: {fmt(pc_vals)}"
     )
     if poor_urls:
-        msg += f"\n\n*不良URL一覧 (モバイル, 最大20件)*:\n" + "\n".join(poor_urls)
+        msg += f"\n\n*不良URL一覧 (最大50件)*:\n" + "\n".join(poor_urls[:50])
+        if len(poor_urls) > 50:
+            msg += f"\n…他 {len(poor_urls)-50} 件"
     post_slack(msg, CHART_FILE)
 
 if __name__ == "__main__":
