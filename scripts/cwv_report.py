@@ -241,112 +241,14 @@ def ensure_dummy_png(path="empty.png"):
         import matplotlib.pyplot as plt
         plt.figure(figsize=(1,1)); plt.axis("off"); plt.savefig(path); plt.close()
 
-def post_slack(text: str, file_path: pathlib.Path | None = None) -> None:
-    if not SLACK_TOKEN:
-        logging.warning("Slack disabled – no token")
-        return
-    client = WebClient(token=SLACK_TOKEN)
-    try:
-        if file_path and file_path.exists():
-            client.files_upload_v2(
-                channel=SLACK_CH,
-                initial_comment=text,
-                file_uploads=[{
-                    "file": str(file_path),
-                    "title": file_path.name,
-                }],
-            )
-        else:
-            client.chat_postMessage(channel=SLACK_CH, text=text)
-    except SlackApiError as e:
-        logging.error("Slack API error: %s – %s", e.response['error'], text)
-        return
-
-# --- robust sitemap collector ---
-def collect_all_sitemaps(origin: str, limit=4000):
-    import random
-    from urllib.parse import urljoin
-    seen = set()
-    urls = set()
-    # robots.txt から Sitemap 行を抽出
-    try:
-        robots = requests.get(urljoin(origin, "/robots.txt"), timeout=10).text
-        for line in robots.splitlines():
-            if line.lower().startswith("sitemap:"):
-                urls.update(_crawl_sitemap(line.split(":",1)[1].strip(), seen))
-    except Exception as e:
-        logging.warning("[robots skip] %s", e)
-    # fallback: sitemap.xml, sitemap_index.xml, wp-sitemap.xml
-    candidates = ["/sitemap.xml", "/sitemap_index.xml", "/wp-sitemap.xml"]
-    base = origin.rstrip("/")
-    sitemap_url = None
-    for path in candidates:
-        url = base + path
-        try:
-            r = requests.head(url, timeout=10, allow_redirects=True)
-            if r.status_code == 200 and "xml" in r.headers.get("content-type", "").lower():
-                sitemap_url = url
-                break
-        except Exception:
-            continue
-    if sitemap_url:
-        urls.update(_crawl_sitemap(sitemap_url, seen))
-    urls = list(urls)
-    random.shuffle(urls)
-    urls = [u for u in urls if not u.lower().endswith(".xml") and ".xml?" not in u.lower()]
-    urls = list(dict.fromkeys(urls))  # 重複除去
-    if not urls:
-        logging.warning("[sitemap skip] 取得 URL が 0 件。サイトマップ設定を確認してください。")
-        ensure_dummy_png("empty.png")
-        post_slack("⚠️ CWV レポート失敗: サイトマップが取得できませんでした。", pathlib.Path("empty.png"))
-        return []
-    return urls[:limit]
-
-def _crawl_sitemap(sm_url: str, seen: set) -> list:
-    if sm_url in seen:
-        return []
-    seen.add(sm_url)
-    out = []
-    try:
-        r = requests.get(sm_url, timeout=30)
-        if r.status_code != 200 or not r.text.lstrip().startswith("<"):
-            logging.warning("[sitemap skip] %s %s", sm_url, r.status_code)
-            return []
-        root = ET.fromstring(r.text)
-        tag = root.tag.lower()
-        if tag.endswith("sitemapindex"):
-            for loc in root.iter("{*}loc"):
-                out += _crawl_sitemap(loc.text.strip(), seen)
-        else:
-            for loc in root.iter("{*}loc"):
-                u = loc.text.strip()
-                ul = u.lower()
-                if ul.endswith(".xml") or ".xml?" in ul:
-                    continue
-                out.append(u)
-    except Exception as e:
-        logging.warning("[sitemap skip] %s %s", sm_url, e)
-    return out
-
-session = requests.Session()
-session.mount("https://", HTTPAdapter(max_retries=Retry(
-    total=3, backoff_factor=0.3, status_forcelist=[500, 502, 503, 504])))
-
 def main():
     today = datetime.date.today().isoformat()
     mob_metrics = fetch_crux("PHONE")
     pc_metrics  = fetch_crux("DESKTOP")
-    mob_pct = aggregate(mob_metrics)
-    pc_pct  = aggregate(pc_metrics)
+    mob_pct = aggregate_probabilistic(mob_metrics)
+    pc_pct  = aggregate_probabilistic(pc_metrics)
     mob_vals = to_counts(mob_pct)
     pc_vals  = to_counts(pc_pct)
-
-    urls = collect_all_sitemaps(ORIGIN_URL)
-    if not urls:
-        return
-
-    poor_urls = []  # 最小実装: 空でもOK
-    # ...per-URL判定は別PRで拡張...
 
     def fmt(vals):
         if TOTAL_COUNT:
@@ -358,10 +260,28 @@ def main():
         f"• デスクトップ: {fmt(pc_vals)}\n"
         f"CWV Report"
     )
-    if poor_urls:
-        msg += "\n\n*⚠️ Poor URL (max 20)*\n" + "\n".join(f"• <{u}>" for u in poor_urls[:20])
     plot_chart(update_history(today, mob_vals, pc_vals))
     post_slack(msg, CHART_FILE)
 
 if __name__ == "__main__":
     main()
+
+# --- Slack送信をfiles_upload()に戻す ---
+def post_slack(text: str, file_path: pathlib.Path | None = None) -> None:
+    if not SLACK_TOKEN:
+        logging.warning("Slack disabled – no token")
+        return
+    client = WebClient(token=SLACK_TOKEN)
+    try:
+        if file_path and file_path.exists():
+            client.files_upload(
+                channels=SLACK_CH,
+                file=str(file_path),
+                title="CWV Report",
+                initial_comment=text,
+            )
+        else:
+            client.chat_postMessage(channel=SLACK_CH, text=text)
+    except SlackApiError as e:
+        logging.error("Slack API error: %s – %s", e.response['error'], text)
+        return
